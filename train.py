@@ -51,6 +51,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train imitation-learning policy from racing demonstrations")
     parser.add_argument("--data", type=Path, action="append", default=None, help="CSV file or directory; repeat for several datasets")
     parser.add_argument("--output", type=Path, default=Path("models/policy.npz"))
+    parser.add_argument("--init-model", type=Path, help="continue training from an existing .npz policy")
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--learning-rate", type=float, default=0.001)
@@ -65,13 +66,18 @@ def main() -> None:
     train_i, valid_i = order[:split], order[split:]
     x_train, y_train = x[train_i], y[train_i]
     x_valid, y_valid = x[valid_i], y[valid_i]
-    hidden_size = 64
-    params = {
-        "w1": rng.normal(0, np.sqrt(2 / x.shape[1]), (x.shape[1], hidden_size)).astype(np.float32),
-        "b1": np.zeros(hidden_size, dtype=np.float32),
-        "w2": rng.normal(0, np.sqrt(2 / hidden_size), (hidden_size, 3)).astype(np.float32),
-        "b2": np.zeros(3, dtype=np.float32),
-    }
+    if args.init_model:
+        with np.load(args.init_model) as data:
+            params = {name: data[name].copy() for name in ("w1", "b1", "w2", "b2")}
+        hidden_size = params["w1"].shape[1]
+    else:
+        hidden_size = 64
+        params = {
+            "w1": rng.normal(0, np.sqrt(2 / x.shape[1]), (x.shape[1], hidden_size)).astype(np.float32),
+            "b1": np.zeros(hidden_size, dtype=np.float32),
+            "w2": rng.normal(0, np.sqrt(2 / hidden_size), (hidden_size, 3)).astype(np.float32),
+            "b2": np.zeros(3, dtype=np.float32),
+        }
     moments = {name: np.zeros_like(value) for name, value in params.items()}
     variances = {name: np.zeros_like(value) for name, value in params.items()}
     update = 0

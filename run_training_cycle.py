@@ -40,13 +40,26 @@ def main() -> None:
     parser.add_argument("--map", type=Path, default=Path("maps/default.json"))
     parser.add_argument("--train-epochs", type=int, default=100)
     parser.add_argument("--eval-agents", type=int, default=20, help="autonomous cars used to score each newly trained policy")
+    parser.add_argument("--seed-data", type=Path, action="append", default=None, help="best human CSV or directory used as the initial expert dataset")
+    parser.add_argument("--base-model", type=Path, help="existing policy to continue training")
     parser.add_argument("--run-name", default="cycle", help="name used to isolate this experiment's DAgger data")
     parser.add_argument("--output", type=Path, default=Path("artifacts/training-history.json"))
     args = parser.parse_args()
     track = Track.load(args.map)
     model_dir = Path("models/cycle") / args.run_name
     policy_path = model_dir / "policy_000.npz"
-    NeuralPolicy.random().save(policy_path)
+    seed_sources = list(args.seed_data or [])
+    if args.base_model and args.base_model.exists():
+        if seed_sources:
+            seed_command = [sys.executable, "train.py", *sum((["--data", str(path)] for path in seed_sources), []), "--output", str(policy_path), "--epochs", str(args.train_epochs), "--init-model", str(args.base_model)]
+            subprocess.run(seed_command, check=True)
+        else:
+            shutil.copy2(args.base_model, policy_path)
+    elif seed_sources:
+        seed_command = [sys.executable, "train.py", *sum((["--data", str(path)] for path in seed_sources), []), "--output", str(policy_path), "--epochs", str(args.train_epochs)]
+        subprocess.run(seed_command, check=True)
+    else:
+        NeuralPolicy.random().save(policy_path)
     best_policy: Path | None = None
     best_score: tuple[float, int, float] | None = None
     history = {"map_path": str(args.map), "track": {"road": list(track.road), "inner_grass": list(track.inner_grass), "start": list(track.start),
@@ -58,10 +71,12 @@ def main() -> None:
         batch = ParallelDaggerBatch(track, NeuralPolicy.load(policy_path), args.map, agents=args.agents, speed=100, display=False, game_mode=mode, label_all=True, expert_probability=expert_probability, route_random_starts=True)
         batch.run()
         sources = []
+        for seed_source in seed_sources:
+            sources.extend(["--data", str(seed_source)])
         for previous in range(1, epoch + 1):
             sources.extend(["--data", str(Path("data/demos") / f"dagger-{args.run_name}-epoch-{previous:02d}")])
         next_policy = model_dir / f"policy_{epoch:03d}.npz"
-        command = [sys.executable, "train.py", *sources, "--output", str(next_policy), "--epochs", str(args.train_epochs)]
+        command = [sys.executable, "train.py", *sources, "--output", str(next_policy), "--epochs", str(args.train_epochs), "--init-model", str(policy_path)]
         print(f"Epoch {epoch}/{args.epochs}: collecting DAgger data with expert share {expert_probability:.0%}; training {next_policy}")
         subprocess.run(command, check=True)
         evaluation = ParallelDaggerBatch(track, NeuralPolicy.load(next_policy), args.map, agents=args.eval_agents, speed=100, display=False,

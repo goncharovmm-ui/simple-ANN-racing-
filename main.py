@@ -6,27 +6,38 @@ from racing.batch import ParallelDaggerBatch
 from racing.expert import ArtificialExpert
 from racing.neural import NeuralPolicy
 from racing.simulator import MapEditor, RacingGame, Track
+from racing.training import TrainingCenter
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="2D racing simulator and demonstration collector")
     parser.add_argument("--record", action="store_true", help="kept for compatibility; player races record automatically")
     parser.add_argument("--editor", action="store_true", help="open the track sandbox/editor (shortcut)")
-    parser.add_argument("--mode", choices=("sandbox", "race"), help="skip menu and open a mode")
+    parser.add_argument("--mode", choices=("sandbox", "race", "training"), help="skip menu and open a mode")
     parser.add_argument("--driver", choices=("player", "ai"), default="player", help="race driver when --mode race is used")
     parser.add_argument("--map", type=Path, default=Path("maps/default.json"), help="map JSON path")
     parser.add_argument("--ai", type=Path, help="run autonomous mode using a trained .npz policy")
+    parser.add_argument("--model", type=Path, help="alias for --ai, useful for launching a saved model")
     parser.add_argument("--dagger", type=Path, help="run AI and collect artificial-expert correction labels")
     parser.add_argument("--episodes", type=int, default=20, help="number of sequential DAgger attempts when --agents 1")
     parser.add_argument("--agents", type=int, default=20, help="parallel DAgger cars (default: 20)")
     parser.add_argument("--speed", type=int, default=8, help="simulation steps per rendered frame for DAgger (default: 8)")
     args = parser.parse_args()
-    policy_path = args.dagger or args.ai or Path("models/policy.npz")
-    if not args.editor and not args.mode and not args.ai and not args.dagger:
-        selection = MainMenu(policy_path.exists()).run()
+    policy_path = args.dagger or args.ai or args.model or Path("models/policy.npz")
+    if not args.editor and not args.mode and not args.ai and not args.dagger and not args.model:
+        models = sorted(Path("models").rglob("*.npz"))
+        desktop = Path.home() / "Desktop"
+        if desktop.exists():
+            models.extend(sorted(desktop.glob("*.npz")))
+        selection = MainMenu(models).run()
         if selection is None:
             return
-        args.mode, args.driver = selection
+        args.mode, args.driver, selected_model = selection
+        if selected_model:
+            policy_path = selected_model
+    if args.mode == "training":
+        TrainingCenter(args.map, policy_path if policy_path.exists() else None).run()
+        return
     track = Track.load(args.map)
     if args.editor or args.mode == "sandbox":
         if args.ai or args.dagger or args.driver == "ai":
