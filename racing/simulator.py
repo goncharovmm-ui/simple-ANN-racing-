@@ -10,6 +10,8 @@ from pathlib import Path
 import numpy as np
 import pygame
 
+from racing.neural import NeuralPolicy
+
 WIDTH, HEIGHT = 1280, 800
 LIDAR_ANGLES = np.linspace(-110.0, 110.0, 15, dtype=np.float32)
 MAX_LIDAR_DISTANCE = 260.0
@@ -112,12 +114,12 @@ def draw_track(screen: pygame.Surface, track: Track, next_checkpoint: int | None
 
 
 class RacingGame:
-    def __init__(self, track: Track, record: bool = False, screen: pygame.Surface | None = None) -> None:
+    def __init__(self, track: Track, record: bool = False, screen: pygame.Surface | None = None, policy: NeuralPolicy | None = None) -> None:
         pygame.init()
         self.screen = screen if screen is not None else pygame.display.set_mode((WIDTH, HEIGHT))
         self.clock, self.font = pygame.time.Clock(), pygame.font.Font(None, 28)
         pygame.display.set_caption("Simple ANN Racing — manual data collection")
-        self.track, self.recording = track, record
+        self.track, self.recording, self.policy = track, record, policy
         self.writer = DemoWriter(Path("data/demos")) if record else None
         self.best_lap: float | None = None
         self.reset("Ready")
@@ -154,9 +156,12 @@ class RacingGame:
 
     def update(self, dt: float) -> tuple[float, float, bool, np.ndarray]:
         keys = pygame.key.get_pressed()
-        steering = float(keys[pygame.K_RIGHT] or keys[pygame.K_d]) - float(keys[pygame.K_LEFT] or keys[pygame.K_a])
-        throttle = float(keys[pygame.K_UP] or keys[pygame.K_w]) - float(keys[pygame.K_DOWN] or keys[pygame.K_s])
-        handbrake = bool(keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT])
+        if self.policy:
+            steering, throttle, handbrake = self.policy.act(self.raycast(), self.car.speed)
+        else:
+            steering = float(keys[pygame.K_RIGHT] or keys[pygame.K_d]) - float(keys[pygame.K_LEFT] or keys[pygame.K_a])
+            throttle = float(keys[pygame.K_UP] or keys[pygame.K_w]) - float(keys[pygame.K_DOWN] or keys[pygame.K_s])
+            handbrake = bool(keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT])
         self.car.update(steering, throttle, handbrake, dt)
         self.elapsed += dt
         self.lap_elapsed += dt
@@ -182,7 +187,7 @@ class RacingGame:
         pygame.draw.circle(self.screen, (250, 250, 250), self.car.position + self.car.heading() * 10, 3)
         best = "--" if self.best_lap is None else f"{self.best_lap:.2f}s"
         lines = [f"Lap {self.completed_laps + 1}: {self.lap_elapsed:.2f}s | best: {best} | score: {self.fitness:.0f}",
-                 f"checkpoints {self.progress} | speed {self.car.speed:5.1f} | recording: {'ON' if self.recording else 'OFF'}",
+                 f"checkpoints {self.progress} | speed {self.car.speed:5.1f} | mode: {'AI' if self.policy else 'manual'}",
                  "WASD/arrows — drive   Shift — drift   R/К — restart   Space — recording   Esc — quit", self.message]
         for i, line in enumerate(lines):
             self.screen.blit(self.font.render(line, True, (250, 250, 250) if i < 3 else (255, 226, 102)), (24, 20 + i * 30))
@@ -199,7 +204,7 @@ class RacingGame:
                         if event.key == pygame.K_ESCAPE: running = False
                         elif event.key == pygame.K_r or event.unicode.lower() == "к":
                             self.reset("Restarted"); self.episode += 1
-                        elif event.key == pygame.K_SPACE:
+                        elif event.key == pygame.K_SPACE and not self.policy:
                             self.recording = not self.recording; self.message = f"Recording {'enabled' if self.recording else 'paused'}"
                 steering, throttle, handbrake, lidar = self.update(dt)
                 if self.recording and not self.car.crashed and self.writer:
