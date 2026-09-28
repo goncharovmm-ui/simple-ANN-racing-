@@ -16,11 +16,20 @@ from racing.neural import NeuralPolicy
 from racing.simulator import Track
 
 
-def trajectory_record(game) -> dict:
-    points, color = game.trajectory_history[-1] if game.trajectory_history else (game.trajectory, (220, 60, 65))
-    return {"success": game.successful_episodes > 0, "lap_seconds": game.last_lap,
+def trajectory_record(game, fastest: float | None, slowest: float | None) -> dict:
+    points, _ = game.trajectory_history[-1] if game.trajectory_history else (game.trajectory, (220, 60, 65))
+    success = game.successful_episodes > 0
+    if success:
+        if fastest is None or slowest is None or slowest == fastest:
+            green = 255
+        else:
+            green = round(255 * (slowest - (game.last_lap or slowest)) / (slowest - fastest))
+        color = [0, green, 0]
+    else:
+        color = [220, 45, 45]
+    return {"success": success, "lap_seconds": game.last_lap,
             "collisions": game.collisions, "color": color,
-            "points": [[round(point.x, 1), round(point.y, 1)] for point in points[::4]]}
+            "points": [[round(point.x, 1), round(point.y, 1)] for point in points]}
 
 
 def main() -> None:
@@ -42,7 +51,9 @@ def main() -> None:
         mode = f"dagger-{args.run_name}-epoch-{epoch:02d}"
         batch = ParallelDaggerBatch(track, NeuralPolicy.load(policy_path), args.map, agents=args.agents, speed=100, display=False, game_mode=mode, label_all=True, expert_controls=epoch <= 2)
         batch.run()
-        trajectories = [trajectory_record(game) for game in batch.games]
+        lap_times = [game.last_lap for game in batch.games if game.successful_episodes > 0 and game.last_lap is not None]
+        fastest, slowest = (min(lap_times), max(lap_times)) if lap_times else (None, None)
+        trajectories = [trajectory_record(game, fastest, slowest) for game in batch.games]
         finished = sum(item["success"] for item in trajectories)
         history["epochs"].append({"epoch": epoch, "policy": str(policy_path), "finished": finished, "agents": args.agents, "trajectories": trajectories})
         args.output.parent.mkdir(parents=True, exist_ok=True)

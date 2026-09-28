@@ -31,6 +31,8 @@ def main() -> None:
     frames.mkdir(parents=True, exist_ok=True)
     frame_number, per_epoch = 0, max(1, args.duration // len(history["epochs"]))
     for epoch in history["epochs"]:
+        successful_times = [item["lap_seconds"] for item in epoch["trajectories"] if item["success"] and item["lap_seconds"] is not None]
+        fastest, slowest = (min(successful_times), max(successful_times)) if successful_times else (None, None)
         for phase in range(1, per_epoch + 1):
             draw_track(screen, track)
             fraction = phase / per_epoch
@@ -38,8 +40,15 @@ def main() -> None:
                 points = [pygame.Vector2(point) for point in trajectory["points"]]
                 visible = points[:max(2, round(len(points) * fraction))]
                 if len(visible) > 1:
-                    pygame.draw.lines(screen, trajectory["color"], False, visible, 3)
-            labels = [f"DAgger training: epoch {epoch['epoch']}/{len(history['epochs'])} | 20 parallel cars", f"finished laps: {epoch['finished']}/{epoch['agents']} | phase {phase}/{per_epoch}", "green = faster/cleaner completed trajectories; red = failed attempts"]
+                    if trajectory["success"]:
+                        if fastest is None or slowest == fastest:
+                            color = (0, 255, 0)
+                        else:
+                            color = (0, round(255 * (slowest - trajectory["lap_seconds"]) / (slowest - fastest)), 0)
+                    else:
+                        color = (220, 45, 45)
+                    pygame.draw.lines(screen, color, False, visible, 3)
+            labels = [f"DAgger training: epoch {epoch['epoch']}/{len(history['epochs'])} | 20 parallel cars", f"finished laps: {epoch['finished']}/{epoch['agents']} | phase {phase}/{per_epoch}", "black → green = slowest → fastest finish; red = failed attempt"]
             for index, label in enumerate(labels):
                 screen.blit(font.render(label, True, (250, 250, 250)), (20, 18 + index * 30))
             pygame.image.save(screen, frames / f"frame_{frame_number:04d}.png")
