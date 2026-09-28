@@ -13,7 +13,7 @@ from racing.simulator import HEIGHT, WIDTH, RacingGame, Track, draw_track
 class ParallelDaggerBatch:
     """Runs many independent DAgger rollouts at accelerated simulation speed."""
 
-    def __init__(self, track: Track, policy: NeuralPolicy, map_path: Path, agents: int = 20, speed: int = 8, display: bool = True, game_mode: str = "dagger", label_all: bool = False, expert_controls: bool = False, expert_probability: float = 0.0, route_random_starts: bool = False, record: bool = True, max_steps: int = 3600) -> None:
+    def __init__(self, track: Track, policy: NeuralPolicy, map_path: Path, agents: int = 20, speed: int = 8, display: bool = True, game_mode: str = "dagger", label_all: bool = False, expert_controls: bool = False, expert_probability: float = 0.0, route_random_starts: bool = False, record: bool = True, require_full_lap: bool = True, max_steps: int = 3600) -> None:
         pygame.init()
         self.display = display
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT)) if display else pygame.Surface((WIDTH, HEIGHT))
@@ -26,7 +26,7 @@ class ParallelDaggerBatch:
         self.games = [RacingGame(track, record=record, screen=pygame.Surface((WIDTH, HEIGHT)), policy=policy,
                                  game_mode=game_mode, map_path=map_path, expert=ArtificialExpert(label_all=label_all),
                                  expert_controls=expert_controls or random.random() < self.expert_probability,
-                                 route_random_start=route_random_starts) for _ in range(agents)]
+                                 route_random_start=route_random_starts, require_full_lap=require_full_lap) for _ in range(agents)]
         self.done = [False] * agents
 
     def step_game(self, game: RacingGame) -> bool:

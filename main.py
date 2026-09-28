@@ -28,10 +28,16 @@ def main() -> None:
         policy_path = args.dagger or args.ai or args.model or Path("models/policy.npz")
         selected_mode, selected_driver = args.mode, args.driver
         if interactive:
-            models = sorted(Path("models").rglob("*.npz"))
+            models = []
+            if Path("models/policy.npz").exists():
+                models.append(Path("models/policy.npz"))
+            models.extend(sorted(Path("models/saved").glob("*.npz")) if Path("models/saved").exists() else [])
+            models.extend(sorted(Path("models/cycle").glob("*/best.npz")) if Path("models/cycle").exists() else [])
             desktop = Path.home() / "Desktop"
             if desktop.exists():
                 models.extend(sorted(desktop.glob("*.npz")))
+            if not models:
+                models = sorted(Path("models").rglob("*.npz"))
             selection = MainMenu(models).run()
             if selection is None:
                 return

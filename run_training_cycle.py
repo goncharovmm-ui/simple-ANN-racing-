@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # Must be set before pygame is imported: macOS otherwise terminates a no-window run.
@@ -28,7 +29,8 @@ def trajectory_record(game, fastest: float | None, slowest: float | None) -> dic
         color = [0, green, 0]
     else:
         color = [220, 45, 45]
-    return {"success": success, "lap_seconds": game.last_lap, "fitness": round(game.fitness, 2), "progress": game.progress,
+    return {"success": success, "lap_seconds": game.last_lap, "fitness": round(game.fitness, 2), "progress": game.last_lap_progress if success else game.progress,
+            "checkpoint_points": round(game.checkpoint_points, 2), "last_checkpoint_accuracy": round(game.last_checkpoint_accuracy, 4),
             "collisions": game.collisions, "color": color,
             "points": [[round(point.x, 1), round(point.y, 1)] for point in points]}
 
@@ -36,16 +38,23 @@ def trajectory_record(game, fastest: float | None, slowest: float | None) -> dic
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run headless DAgger epochs and train after every epoch")
     parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--agents", type=int, default=20)
+    parser.add_argument("--agents", type=int, help="total collection cars; defaults to best-trajectories × cars-per-trajectory")
     parser.add_argument("--map", type=Path, default=Path("maps/default.json"))
     parser.add_argument("--train-epochs", type=int, default=100)
     parser.add_argument("--eval-agents", type=int, default=20, help="autonomous cars used to score each newly trained policy")
     parser.add_argument("--seed-data", type=Path, action="append", default=None, help="best human CSV or directory used as the initial expert dataset")
     parser.add_argument("--base-model", type=Path, help="existing policy to continue training")
+    parser.add_argument("--best-trajectories", type=int, default=3, help="number of best human trajectories included in every training epoch")
+    parser.add_argument("--cars-per-trajectory", type=int, default=7, help="collection cars allocated to each selected trajectory")
+    parser.add_argument("--map-name", default=None, help="friendly map name stored in training history")
+    parser.add_argument("--model-name", default=None, help="friendly model name stored in training history")
     parser.add_argument("--run-name", default="cycle", help="name used to isolate this experiment's DAgger data")
     parser.add_argument("--output", type=Path, default=Path("artifacts/training-history.json"))
     args = parser.parse_args()
     track = Track.load(args.map)
+    best_trajectories = max(1, args.best_trajectories)
+    cars_per_trajectory = max(1, args.cars_per_trajectory)
+    collection_agents = args.agents or best_trajectories * cars_per_trajectory
     model_dir = Path("models/cycle") / args.run_name
     policy_path = model_dir / "policy_000.npz"
     seed_sources = list(args.seed_data or [])
@@ -62,13 +71,16 @@ def main() -> None:
         NeuralPolicy.random().save(policy_path)
     best_policy: Path | None = None
     best_score: tuple[float, int, float] | None = None
-    history = {"map_path": str(args.map), "track": {"road": list(track.road), "inner_grass": list(track.inner_grass), "start": list(track.start),
+    history = {"map_path": str(args.map), "map_name": args.map_name or track.name, "model_name": args.model_name or args.run_name,
+               "settings": {"epochs": args.epochs, "collection_agents": collection_agents, "best_trajectories": best_trajectories, "cars_per_trajectory": cars_per_trajectory},
+               "track": {"name": track.name, "road": list(track.road), "inner_grass": list(track.inner_grass), "start": list(track.start),
                "finish": list(track.finish), "obstacles": [list(rect) for rect in track.obstacles],
                "checkpoints": [list(point) for point in track.checkpoints]}, "epochs": []}
     for epoch in range(1, args.epochs + 1):
+        epoch_started = time.monotonic()
         mode = f"dagger-{args.run_name}-epoch-{epoch:02d}"
         expert_probability = max(0.10, 0.85 * (0.82 ** (epoch - 1)))
-        batch = ParallelDaggerBatch(track, NeuralPolicy.load(policy_path), args.map, agents=args.agents, speed=100, display=False, game_mode=mode, label_all=True, expert_probability=expert_probability, route_random_starts=True)
+        batch = ParallelDaggerBatch(track, NeuralPolicy.load(policy_path), args.map, agents=collection_agents, speed=100, display=False, game_mode=mode, label_all=True, expert_probability=expert_probability, route_random_starts=True)
         batch.run()
         sources = []
         for seed_source in seed_sources:
@@ -97,13 +109,15 @@ def main() -> None:
             shutil.copy2(next_policy, best_policy)
             best_score = score
         policy_path = best_policy if best_policy is not None else next_policy
+        epoch_seconds = round(time.monotonic() - epoch_started, 1)
         history["epochs"].append({"epoch": epoch, "policy": str(next_policy), "selected_policy": str(policy_path), "expert_probability": expert_probability,
-                                  "finished": finished, "agents": args.eval_agents, "mean_lap_seconds": None if mean_lap == float("inf") else mean_lap,
+                                  "epoch_seconds": epoch_seconds, "collection_agents": collection_agents, "best_trajectories": best_trajectories,
+                                  "cars_per_trajectory": cars_per_trajectory, "finished": finished, "agents": args.eval_agents, "mean_lap_seconds": None if mean_lap == float("inf") else mean_lap,
                                   "mean_fitness": round(mean_fitness, 2),
                                   "promoted": promoted, "trajectories": trajectories})
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
-        print(f"Epoch {epoch}/{args.epochs}: autonomous evaluation {finished}/{args.eval_agents}; {'new best policy' if promoted else 'kept previous best'}")
+        print(f"Epoch {epoch}/{args.epochs}: autonomous evaluation {finished}/{args.eval_agents}; {epoch_seconds:.1f}s; {'new best policy' if promoted else 'kept previous best'}")
     Path("models/policy.npz").write_bytes(policy_path.read_bytes())
     print(f"Complete. Best policy: {policy_path}; history: {args.output}")
 

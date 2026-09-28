@@ -21,6 +21,7 @@ LIDAR_ANGLES = np.linspace(-110.0, 110.0, 15, dtype=np.float32)
 MAX_LIDAR_DISTANCE = 260.0
 LAP_BONUS = 10_000
 CHECKPOINT_BONUS = 2_500
+CHECKPOINT_RADIUS = 64.0
 
 
 @dataclass
@@ -35,6 +36,7 @@ class Track:
         pygame.Vector2(1090, 625), pygame.Vector2(650, 630), pygame.Vector2(190, 630), pygame.Vector2(170, 390)])
     obstacles: list[pygame.Rect] = field(default_factory=lambda: [
         pygame.Rect(610, 120, 48, 105), pygame.Rect(1000, 500, 70, 48), pygame.Rect(215, 530, 70, 48)])
+    name: str = "Untitled track"
 
     @classmethod
     def load(cls, path: Path | None) -> "Track":
@@ -43,11 +45,11 @@ class Track:
         raw = json.loads(path.read_text(encoding="utf-8"))
         return cls(pygame.Rect(raw["road"]), pygame.Rect(raw["inner_grass"]), pygame.Vector2(raw["start"][:2]),
                    float(raw["start"][2]), pygame.Vector2(raw.get("finish", [170, 215])), [pygame.Vector2(p) for p in raw["checkpoints"]],
-                   [pygame.Rect(r) for r in raw["obstacles"]])
+                   [pygame.Rect(r) for r in raw["obstacles"]], raw.get("name", path.stem))
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        raw = {"road": list(self.road), "inner_grass": list(self.inner_grass),
+        raw = {"name": self.name, "road": list(self.road), "inner_grass": list(self.inner_grass),
                "start": [round(self.start.x), round(self.start.y), self.start_angle], "finish": [round(self.finish.x), round(self.finish.y)],
                "checkpoints": [[round(p.x), round(p.y)] for p in self.checkpoints],
                "obstacles": [list(rect) for rect in self.obstacles]}
@@ -133,7 +135,7 @@ class Car:
 
 
 class DemoWriter:
-    fields = ["run_id", "mode", "driver", "track_id", "map_path", "episode", "step", "x", "y", "angle", "speed", "next_checkpoint", "progress", "collisions", "elapsed_s", "lap_s", "fitness", "steering", "throttle", "handbrake", *[f"lidar_{i}" for i in range(len(LIDAR_ANGLES))]]
+    fields = ["run_id", "mode", "driver", "track_id", "map_path", "episode", "step", "x", "y", "angle", "speed", "next_checkpoint", "progress", "checkpoint_points", "checkpoint_accuracy", "collisions", "elapsed_s", "lap_s", "fitness", "steering", "throttle", "handbrake", *[f"lidar_{i}" for i in range(len(LIDAR_ANGLES))]]
 
     def __init__(self, directory: Path, metadata: dict[str, str], require_finish: bool = True) -> None:
         self.require_finish = require_finish
@@ -155,7 +157,7 @@ class DemoWriter:
         car = game.car
         row = {**self.metadata, "episode": game.episode, "step": game.step, "x": round(car.position.x, 3), "y": round(car.position.y, 3),
                "angle": round(car.angle, 3), "speed": round(car.speed, 3), "next_checkpoint": game.next_checkpoint,
-               "progress": game.progress, "collisions": game.collisions, "elapsed_s": round(game.elapsed, 3), "lap_s": round(game.lap_elapsed, 3),
+               "progress": game.progress, "checkpoint_points": round(game.checkpoint_points, 2), "checkpoint_accuracy": round(game.last_checkpoint_accuracy, 4), "collisions": game.collisions, "elapsed_s": round(game.elapsed, 3), "lap_s": round(game.lap_elapsed, 3),
                "fitness": round(game.fitness, 3), "steering": round(steering, 3), "throttle": round(throttle, 3), "handbrake": int(handbrake)}
         row.update({f"lidar_{i}": round(float(v), 4) for i, v in enumerate(lidar)})
         self.writer.writerow(row)
@@ -189,21 +191,37 @@ def draw_track(screen: pygame.Surface, track: Track, next_checkpoint: int | None
     pygame.draw.rect(screen, (239, 110, 64), track.inner_grass, width=4, border_radius=20)
     for obstacle in track.obstacles:
         pygame.draw.rect(screen, (193, 58, 55), obstacle, border_radius=5)
+    zones = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
     for i, checkpoint in enumerate(track.checkpoints):
-        pygame.draw.circle(screen, (246, 208, 74) if i == next_checkpoint else (170, 174, 178), checkpoint, 9)
+        selected = i == next_checkpoint
+        pygame.draw.circle(zones, (246, 208, 74, 105) if selected else (175, 185, 195, 48), checkpoint, round(CHECKPOINT_RADIUS), 2)
+        pygame.draw.circle(screen, (246, 208, 74) if selected else (170, 174, 178), checkpoint, 9)
+    screen.blit(zones, (0, 0))
     finish_color = (81, 231, 126) if finish_active else (118, 168, 132)
     pygame.draw.circle(screen, finish_color, track.finish, 15, width=4)
     pygame.draw.line(screen, finish_color, track.finish + pygame.Vector2(-11, 0), track.finish + pygame.Vector2(11, 0), 3)
 
 
+def speed_color(speed: float, maximum: float = 360.0) -> tuple[int, int, int]:
+    """Blue = slow, yellow = medium, red = fast."""
+    ratio = max(0.0, min(1.0, speed / maximum))
+    return round(35 + 220 * ratio), round(205 - 125 * ratio), round(255 - 220 * ratio)
+
+
+def draw_speed_trajectory(screen: pygame.Surface, samples: list[tuple[pygame.Vector2, float]], width: int = 3) -> None:
+    for (start, start_speed), (end, end_speed) in zip(samples, samples[1:]):
+        pygame.draw.line(screen, speed_color((start_speed + end_speed) * 0.5), start, end, width)
+
+
 class RacingGame:
-    def __init__(self, track: Track, record: bool = False, screen: pygame.Surface | None = None, policy: NeuralPolicy | None = None, game_mode: str = "race", map_path: Path = Path("maps/default.json"), expert: ArtificialExpert | None = None, max_episodes: int | None = None, expert_controls: bool = False, route_random_start: bool = False) -> None:
+    def __init__(self, track: Track, record: bool = False, screen: pygame.Surface | None = None, policy: NeuralPolicy | None = None, game_mode: str = "race", map_path: Path = Path("maps/default.json"), expert: ArtificialExpert | None = None, max_episodes: int | None = None, expert_controls: bool = False, route_random_start: bool = False, require_full_lap: bool = False) -> None:
         pygame.init()
         self.screen = screen if screen is not None else pygame.display.set_mode((WIDTH, HEIGHT))
         self.clock, self.font = pygame.time.Clock(), pygame.font.Font(None, 28)
         pygame.display.set_caption("Simple ANN Racing — manual data collection")
         self.track, self.recording, self.policy, self.expert, self.expert_controls = track, record, policy, expert, expert_controls
         self.route_random_start = route_random_start
+        self.require_full_lap = require_full_lap
         self.game_mode, self.map_path = game_mode, map_path
         self.track_id = f"{map_path.stem}-{track.fingerprint()}"
         self.run_id = uuid4().hex
@@ -214,7 +232,9 @@ class RacingGame:
         self.dagger_label: tuple[float, float, bool] | None = None
         self.max_episodes, self.finished_episodes, self.successful_episodes = max_episodes, 0, 0
         self.trajectory: list[pygame.Vector2] = []
+        self.trajectory_speeds: list[float] = []
         self.trajectory_history: list[tuple[list[pygame.Vector2], tuple[int, int, int]]] = []
+        self.reference_trajectory = self.load_best_reference_trajectory()
         if record:
             self.start_recording()
         self.best_lap: float | None = None
@@ -231,10 +251,30 @@ class RacingGame:
         self.writer = DemoWriter(Path("data/demos") / self.game_mode / self.track_id, metadata, require_finish=not bool(self.expert))
         self.recording = True
 
+    def load_best_reference_trajectory(self) -> list[tuple[pygame.Vector2, float]]:
+        """Load the fastest completed player path for this exact map revision."""
+        candidates: list[tuple[float, list[tuple[pygame.Vector2, float]]]] = []
+        directory = Path("data/demos/race")
+        if not directory.exists():
+            return []
+        for path in directory.rglob("*.csv"):
+            try:
+                with path.open(encoding="utf-8", newline="") as handle:
+                    rows = list(csv.DictReader(handle))
+                if not rows or rows[0].get("track_id") != self.track_id or rows[0].get("driver") != "player":
+                    continue
+                samples = [(pygame.Vector2(float(row["x"]), float(row["y"])), float(row.get("speed") or 0.0)) for row in rows]
+                lap = max(float(row.get("lap_s") or 0.0) for row in rows)
+                if samples and lap > 0:
+                    candidates.append((lap, samples))
+            except (OSError, ValueError, KeyError):
+                continue
+        return min(candidates, key=lambda item: item[0])[1] if candidates else []
+
     @property
     def fitness(self) -> float:
         """Reward progress strongly while still allowing a shortcut to finish."""
-        return self.completed_laps * LAP_BONUS + self.progress * CHECKPOINT_BONUS - self.elapsed * 10 - self.collisions * 250
+        return self.completed_laps * LAP_BONUS + self.checkpoint_points - self.elapsed * 10 - self.collisions * 250
 
     def is_road(self, point: pygame.Vector2) -> bool:
         return self.track.road.collidepoint(point) and not self.track.inner_grass.collidepoint(point) and not any(r.collidepoint(point) for r in self.track.obstacles)
@@ -264,6 +304,15 @@ class RacingGame:
         factor = max(0.0, min(1.0, (point - start).dot(segment) / length_squared))
         return point.distance_to(start + segment * factor) <= radius
 
+    @staticmethod
+    def segment_distance(point: pygame.Vector2, start: pygame.Vector2, end: pygame.Vector2) -> float:
+        segment = end - start
+        length_squared = segment.length_squared()
+        if length_squared == 0:
+            return point.distance_to(end)
+        factor = max(0.0, min(1.0, (point - start).dot(segment) / length_squared))
+        return point.distance_to(start + segment * factor)
+
     def reset(self, reason: str) -> None:
         if self.writer:
             if self.writer.committed:
@@ -279,12 +328,17 @@ class RacingGame:
             position, angle, initial_checkpoint = *self.track.random_start(), 0
         self.car = Car(position, angle)
         self.next_checkpoint, self.progress, self.completed_laps, self.step = initial_checkpoint, 0, 0, 0
+        self.visited_checkpoints: set[int] = set()
+        self.checkpoint_points = 0.0
+        self.last_checkpoint_accuracy = 0.0
+        self.last_lap_progress = 0
         self.awaiting_finish = False
         self.elapsed = self.lap_elapsed = 0.0
         self.collisions = 0
         self.game_over = False
         self.idle_seconds = 0.0
         self.trajectory = []
+        self.trajectory_speeds = []
         self.last_lap: float | None = None
         self.message = reason
 
@@ -307,6 +361,7 @@ class RacingGame:
         self.car.update(steering, throttle, handbrake, dt)
         movement_start, movement_end = self.car.last_position.copy(), self.car.position.copy()
         self.trajectory.append(self.car.position.copy())
+        self.trajectory_speeds.append(self.car.speed)
         self.elapsed += dt
         self.lap_elapsed += dt
         if self.car.speed < 12.0:
@@ -324,19 +379,34 @@ class RacingGame:
                 self.message = "Game over: 5 wall hits — press R/К for a new attempt"
             else:
                 self.message = f"Wall hit: speed reduced ({self.collisions}/5)"
-        if self.track.checkpoints and not self.awaiting_finish and self.crossed_zone(self.track.checkpoints[self.next_checkpoint], movement_start, movement_end):
-            self.progress += 1
-            self.next_checkpoint += 1
-            if self.next_checkpoint == len(self.track.checkpoints):
+        if self.track.checkpoints and not self.awaiting_finish:
+            for index, checkpoint in enumerate(self.track.checkpoints):
+                if index in self.visited_checkpoints or not self.crossed_zone(checkpoint, movement_start, movement_end, CHECKPOINT_RADIUS):
+                    continue
+                distance = self.segment_distance(checkpoint, movement_start, movement_end)
+                self.last_checkpoint_accuracy = max(0.0, min(1.0, 1.0 - distance / CHECKPOINT_RADIUS))
+                checkpoint_bonus = CHECKPOINT_BONUS * (0.25 + 0.75 * self.last_checkpoint_accuracy)
+                self.checkpoint_points += checkpoint_bonus
+                self.visited_checkpoints.add(index)
+                self.progress = len(self.visited_checkpoints)
+                self.message = f"Checkpoint {self.progress}/{len(self.track.checkpoints)} — accuracy {self.last_checkpoint_accuracy:.0%}, +{checkpoint_bonus:.0f}"
+            remaining = [index for index in range(len(self.track.checkpoints)) if index not in self.visited_checkpoints]
+            if remaining:
+                self.next_checkpoint = min(remaining, key=lambda index: self.car.position.distance_to(self.track.checkpoints[index]))
+            else:
                 self.awaiting_finish = True
+                self.next_checkpoint = len(self.track.checkpoints)
                 self.message = "All checkpoints passed — head to the finish"
         # A finish may be crossed at any time.  Checkpoints are a large fitness
         # bonus rather than a hard gate, which lets the agent discover shortcuts.
-        if self.crossed_zone(self.track.finish, movement_start, movement_end):
+        if self.crossed_zone(self.track.finish, movement_start, movement_end) and (not self.require_full_lap or len(self.visited_checkpoints) == len(self.track.checkpoints)):
             self.completed_laps += 1
             self.last_lap = self.lap_elapsed
+            self.last_lap_progress = self.progress
             self.best_lap = self.last_lap if self.best_lap is None else min(self.best_lap, self.last_lap)
             self.lap_elapsed, self.next_checkpoint, self.awaiting_finish = 0.0, 0, False
+            self.visited_checkpoints.clear()
+            self.progress = 0
             if self.writer and not self.writer.committed:
                 self.writer.commit()
                 self.message = f"Lap {self.completed_laps}: {self.last_lap:.2f}s, checkpoints {self.progress} — run saved"
@@ -349,8 +419,10 @@ class RacingGame:
         for points, color in self.trajectory_history:
             if len(points) > 1:
                 pygame.draw.lines(self.screen, color, False, points, 3)
-        if len(self.trajectory) > 1:
-            pygame.draw.lines(self.screen, (240, 188, 65), False, self.trajectory, 2)
+        if not self.policy and self.reference_trajectory:
+            draw_speed_trajectory(self.screen, self.reference_trajectory, 4)
+        if len(self.trajectory_speeds) > 1:
+            draw_speed_trajectory(self.screen, list(zip(self.trajectory, self.trajectory_speeds)), 3)
         for angle, distance in zip(LIDAR_ANGLES, lidar):
             radians = math.radians(self.car.angle + float(angle))
             endpoint = self.car.position + pygame.Vector2(math.cos(radians), math.sin(radians)) * distance * MAX_LIDAR_DISTANCE
@@ -359,8 +431,10 @@ class RacingGame:
         pygame.draw.circle(self.screen, (250, 250, 250), self.car.position + self.car.heading() * 10, 3)
         best = "--" if self.best_lap is None else f"{self.best_lap:.2f}s"
         lines = [f"Lap {self.completed_laps + 1}: {self.lap_elapsed:.2f}s | best: {best} | score: {self.fitness:.0f}",
-                 f"checkpoints {self.progress} | speed {self.car.speed:5.1f} | hits {self.collisions} | idle {self.idle_seconds:.1f}s | mode: {'AI' if self.policy else 'manual'}",
+                 f"checkpoints {self.progress} | accuracy {self.last_checkpoint_accuracy:.0%} | speed {self.car.speed:5.1f} | hits {self.collisions} | mode: {'AI' if self.policy else 'manual'}",
                  "WASD/arrows — drive   Shift — drift   R/К — restart   Esc — quit", self.message]
+        if not self.policy and self.reference_trajectory:
+            lines.insert(2, "reference/current trajectory: blue = slow, red = fast")
         if self.expert and self.max_episodes:
             lines.insert(2, f"DAgger batch: {self.finished_episodes}/{self.max_episodes} | finished: {self.successful_episodes} | green = better trajectory")
         for i, line in enumerate(lines):
