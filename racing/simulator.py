@@ -19,6 +19,8 @@ from racing.expert import ArtificialExpert
 WIDTH, HEIGHT = 1280, 800
 LIDAR_ANGLES = np.linspace(-110.0, 110.0, 15, dtype=np.float32)
 MAX_LIDAR_DISTANCE = 260.0
+LAP_BONUS = 10_000
+CHECKPOINT_BONUS = 2_500
 
 
 @dataclass
@@ -231,7 +233,8 @@ class RacingGame:
 
     @property
     def fitness(self) -> float:
-        return self.completed_laps * 10_000 + self.progress * 1_000 - self.elapsed * 10 - self.collisions * 250
+        """Reward progress strongly while still allowing a shortcut to finish."""
+        return self.completed_laps * LAP_BONUS + self.progress * CHECKPOINT_BONUS - self.elapsed * 10 - self.collisions * 250
 
     def is_road(self, point: pygame.Vector2) -> bool:
         return self.track.road.collidepoint(point) and not self.track.inner_grass.collidepoint(point) and not any(r.collidepoint(point) for r in self.track.obstacles)
@@ -327,20 +330,22 @@ class RacingGame:
             if self.next_checkpoint == len(self.track.checkpoints):
                 self.awaiting_finish = True
                 self.message = "All checkpoints passed — head to the finish"
-        if self.awaiting_finish and self.crossed_zone(self.track.finish, movement_start, movement_end):
+        # A finish may be crossed at any time.  Checkpoints are a large fitness
+        # bonus rather than a hard gate, which lets the agent discover shortcuts.
+        if self.crossed_zone(self.track.finish, movement_start, movement_end):
             self.completed_laps += 1
             self.last_lap = self.lap_elapsed
             self.best_lap = self.last_lap if self.best_lap is None else min(self.best_lap, self.last_lap)
             self.lap_elapsed, self.next_checkpoint, self.awaiting_finish = 0.0, 0, False
             if self.writer and not self.writer.committed:
                 self.writer.commit()
-                self.message = f"Lap {self.completed_laps}: {self.last_lap:.2f}s — run saved"
+                self.message = f"Lap {self.completed_laps}: {self.last_lap:.2f}s, checkpoints {self.progress} — run saved"
             else:
-                self.message = f"Lap {self.completed_laps}: {self.last_lap:.2f}s"
+                self.message = f"Lap {self.completed_laps}: {self.last_lap:.2f}s, checkpoints {self.progress}"
         return steering, throttle, handbrake, self.raycast()
 
     def draw(self, lidar: np.ndarray) -> None:
-        draw_track(self.screen, self.track, None if self.awaiting_finish else self.next_checkpoint, self.awaiting_finish)
+        draw_track(self.screen, self.track, None if self.awaiting_finish else self.next_checkpoint, True)
         for points, color in self.trajectory_history:
             if len(points) > 1:
                 pygame.draw.lines(self.screen, color, False, points, 3)

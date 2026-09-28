@@ -28,7 +28,7 @@ def trajectory_record(game, fastest: float | None, slowest: float | None) -> dic
         color = [0, green, 0]
     else:
         color = [220, 45, 45]
-    return {"success": success, "lap_seconds": game.last_lap,
+    return {"success": success, "lap_seconds": game.last_lap, "fitness": round(game.fitness, 2), "progress": game.progress,
             "collisions": game.collisions, "color": color,
             "points": [[round(point.x, 1), round(point.y, 1)] for point in points]}
 
@@ -48,7 +48,7 @@ def main() -> None:
     policy_path = model_dir / "policy_000.npz"
     NeuralPolicy.random().save(policy_path)
     best_policy: Path | None = None
-    best_score: tuple[int, float] | None = None
+    best_score: tuple[float, int, float] | None = None
     history = {"map_path": str(args.map), "track": {"road": list(track.road), "inner_grass": list(track.inner_grass), "start": list(track.start),
                "finish": list(track.finish), "obstacles": [list(rect) for rect in track.obstacles],
                "checkpoints": [list(point) for point in track.checkpoints]}, "epochs": []}
@@ -73,7 +73,8 @@ def main() -> None:
         trajectories = [trajectory_record(game, fastest, slowest) for game in evaluation.games]
         finished = sum(item["success"] for item in trajectories)
         mean_lap = sum(lap_times) / len(lap_times) if lap_times else float("inf")
-        score = (finished, -mean_lap)
+        mean_fitness = sum(game.fitness for game in evaluation.games) / len(evaluation.games)
+        score = (mean_fitness, finished, -mean_lap)
         promoted = best_score is None or score > best_score
         if promoted:
             best_policy = model_dir / "best.npz"
@@ -83,6 +84,7 @@ def main() -> None:
         policy_path = best_policy if best_policy is not None else next_policy
         history["epochs"].append({"epoch": epoch, "policy": str(next_policy), "selected_policy": str(policy_path), "expert_probability": expert_probability,
                                   "finished": finished, "agents": args.eval_agents, "mean_lap_seconds": None if mean_lap == float("inf") else mean_lap,
+                                  "mean_fitness": round(mean_fitness, 2),
                                   "promoted": promoted, "trajectories": trajectories})
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
