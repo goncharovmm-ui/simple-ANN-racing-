@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pygame
 
+from racing.neural import NeuralPolicy
 from racing.simulator import HEIGHT, WIDTH, Track
 
 
@@ -37,6 +38,8 @@ class TrainingCenter:
         self.model_name = self.selected_model.stem if self.selected_model else "new-model"
         self.editing: str | None = None
         self.best_trajectories, self.cars_per_trajectory = 3, 7
+        self.hidden_units = self.model_architecture() or [64]
+        self.architecture_layer = 0
         self.process: subprocess.Popen[str] | None = None
         self.video_process: subprocess.Popen[str] | None = None
         self.output_buffer = b""
@@ -70,6 +73,33 @@ class TrainingCenter:
     @property
     def selected_model(self) -> Path | None:
         return self.models[self.model_index] if self.models else None
+
+    def model_architecture(self) -> list[int] | None:
+        if not self.selected_model or not self.selected_model.exists():
+            return None
+        try:
+            return NeuralPolicy.load(self.selected_model).hidden_sizes
+        except (OSError, ValueError, KeyError):
+            return None
+
+    @property
+    def architecture_label(self) -> str:
+        return "16 -> " + " -> ".join(str(width) for width in self.hidden_units) + " -> 3"
+
+    def change_layers(self, delta: int) -> None:
+        if self.process:
+            return
+        if delta > 0:
+            self.hidden_units.append(self.hidden_units[-1] if self.hidden_units else 64)
+        elif len(self.hidden_units) > 1:
+            self.hidden_units.pop()
+        self.architecture_layer = min(self.architecture_layer, len(self.hidden_units) - 1)
+
+    def change_layer_width(self, delta: int) -> None:
+        if self.process:
+            return
+        index = min(self.architecture_layer, len(self.hidden_units) - 1)
+        self.hidden_units[index] = max(1, min(2048, self.hidden_units[index] + delta))
 
     def text(self, value: str, position: tuple[int, int], font: pygame.font.Font, color: tuple[int, int, int] = (240, 240, 240)) -> None:
         self.screen.blit(font.render(value, True, color), position)
@@ -161,7 +191,7 @@ class TrainingCenter:
         track.name = self.map_name.strip() or self.map_path.stem
         track.save(self.map_path)
         collection_agents = self.best_trajectories * self.cars_per_trajectory
-        command = [sys.executable, "run_training_cycle.py", "--epochs", str(self.total_epochs), "--agents", str(collection_agents), "--eval-agents", "20", "--train-epochs", "20", "--best-trajectories", str(self.best_trajectories), "--cars-per-trajectory", str(self.cars_per_trajectory), "--map-name", track.name, "--model-name", self.model_name, "--run-name", self.run_name, "--output", str(self.history_path)]
+        command = [sys.executable, "run_training_cycle.py", "--epochs", str(self.total_epochs), "--agents", str(collection_agents), "--eval-agents", "20", "--train-epochs", "20", "--best-trajectories", str(self.best_trajectories), "--cars-per-trajectory", str(self.cars_per_trajectory), "--hidden-layers", str(len(self.hidden_units)), "--hidden-units", ",".join(map(str, self.hidden_units)), "--map-name", track.name, "--model-name", self.model_name, "--run-name", self.run_name, "--output", str(self.history_path)]
         if seeds:
             for seed in seeds:
                 command.extend(["--seed-data", str(seed)])
@@ -169,7 +199,11 @@ class TrainingCenter:
         else:
             self.status = "Полный человеческий круг не найден — запуск с экспертного старта"
         if self.selected_model and self.selected_model.exists():
-            command.extend(["--base-model", str(self.selected_model)])
+            selected_architecture = self.model_architecture()
+            if selected_architecture == self.hidden_units:
+                command.extend(["--base-model", str(self.selected_model)])
+            else:
+                self.status = "Архитектура изменена — начнём новую модель на выбранных данных"
         # Read raw bytes below.  TextIOWrapper + O_NONBLOCK can receive None
         # from macOS pipes and crash while decoding partial UTF-8 output.
         self.process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=False, bufsize=0)
@@ -292,6 +326,7 @@ class TrainingCenter:
         seed_paths = self.human_demos(self.best_trajectories)
         self.text(f"Лучшие траектории: {len(seed_paths)}/{self.best_trajectories}   |   машин на траекторию: {self.cars_per_trajectory}   |   сбор машин: {self.best_trajectories * self.cars_per_trajectory}", (52, 220), self.small_font, (120, 230, 150) if seed_paths else (255, 205, 100))
         self.text(f"Базовая модель: {self.selected_model if self.selected_model else 'нет — будет создана новая'}", (52, 250), self.small_font)
+        self.text(f"Архитектура сети: {self.architecture_label}   (у каждого слоя можно задать свою ширину)", (52, 275), self.small_font, (190, 200, 210))
         bar = pygame.Rect(52, 290, 1170, 30)
         pygame.draw.rect(self.screen, (50, 56, 66), bar, border_radius=7)
         progress = 1.0 if self.video_path and self.video_path.exists() else (self.epoch / max(1, self.total_epochs))
@@ -310,9 +345,12 @@ class TrainingCenter:
         self.button(pygame.Rect(352, 485, 285, 52), "Сохранить модель (S)", False)
         self.button(pygame.Rect(652, 485, 270, 52), "Видео (V)", False)
         self.button(pygame.Rect(937, 485, 285, 52), "Открыть видео (Enter)", False)
-        self.text("Последние сообщения:", (52, 585), self.small_font, (190, 200, 210))
-        for index, line in enumerate(self.lines):
-            self.text(line[-150:], (52, 612 + index * 25), self.small_font, (220, 225, 230))
+        self.button(pygame.Rect(52, 550, 190, 42), f"Слоёв: {len(self.hidden_units)}  [-/+] ", bool(self.process))
+        self.button(pygame.Rect(252, 550, 190, 42), f"Выбран слой: {self.architecture_layer + 1}", bool(self.process))
+        self.button(pygame.Rect(452, 550, 270, 42), f"Нейронов: {self.hidden_units[self.architecture_layer]}  [-/+] ", bool(self.process))
+        self.text("Последние сообщения:", (52, 610), self.small_font, (190, 200, 210))
+        for index, line in enumerate(self.lines[-3:]):
+            self.text(line[-150:], (52, 635 + index * 23), self.small_font, (220, 225, 230))
         if self.epoch_times:
             timing = "Время эпох: " + ", ".join(f"{index + 1} — {seconds:.1f}с" for index, seconds in enumerate(self.epoch_times[-8:]))
             self.text(timing, (52, 740), self.small_font, (190, 200, 210))
@@ -343,6 +381,9 @@ class TrainingCenter:
                             self.map_index = (self.map_index + 1) % len(self.maps)
                         elif event.key == pygame.K_l and not self.process and self.models:
                             self.model_index = (self.model_index + 1) % len(self.models)
+                            self.model_name = self.selected_model.stem
+                            self.hidden_units = self.model_architecture() or [64]
+                            self.architecture_layer = 0
                         elif event.key == pygame.K_s:
                             self.export_model()
                         elif event.key == pygame.K_v:
@@ -384,6 +425,8 @@ class TrainingCenter:
                         elif 415 <= y <= 467 and 987 <= x < 1222 and not self.process and self.models:
                             self.model_index = (self.model_index + 1) % len(self.models)
                             self.model_name = self.selected_model.stem
+                            self.hidden_units = self.model_architecture() or [64]
+                            self.architecture_layer = 0
                         elif 485 <= y <= 537 and x < 337:
                             self.start_training()
                         elif 485 <= y <= 537 and 352 <= x < 637:
@@ -392,6 +435,12 @@ class TrainingCenter:
                             self.start_video()
                         elif 485 <= y <= 537 and 937 <= x < 1222:
                             self.open_video()
+                        elif 550 <= y <= 592 and 52 <= x < 242 and not self.process:
+                            self.change_layers(-1 if x < 147 else 1)
+                        elif 550 <= y <= 592 and 252 <= x < 442 and not self.process:
+                            self.architecture_layer = (self.architecture_layer + 1) % len(self.hidden_units)
+                        elif 550 <= y <= 592 and 452 <= x < 722 and not self.process:
+                            self.change_layer_width(-1 if x < 587 else 1)
                 self.draw()
                 pygame.display.flip()
                 self.clock.tick(30)

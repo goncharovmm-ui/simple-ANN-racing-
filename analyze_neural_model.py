@@ -40,8 +40,10 @@ def load_rows(path: Path) -> list[dict[str, str]]:
 def forward(policy: NeuralPolicy, row: dict[str, str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     lidar = np.asarray([float(row[f"lidar_{i}"]) for i in range(15)], dtype=np.float32)
     features = make_features(lidar, float(row.get("speed") or 0.0))
-    hidden = np.maximum(features @ policy.w1 + policy.b1, 0.0)
-    raw = hidden @ policy.w2 + policy.b2
+    hidden = features
+    for weight, bias in zip(policy.weights[:-1], policy.biases[:-1]):
+        hidden = np.maximum(hidden @ weight + bias, 0.0)
+    raw = hidden @ policy.weights[-1] + policy.biases[-1]
     output = raw.copy()
     output[:2] = np.tanh(raw[:2])
     output[2] = 1.0 / (1.0 + np.exp(-raw[2]))
@@ -61,7 +63,7 @@ def signal_alpha(value: float, floor: int = 5) -> int:
 
 def render_tile(screen: pygame.Surface, frame: int, row: dict[str, str], features: np.ndarray, hidden: np.ndarray, output: np.ndarray,
                 weights: dict[str, np.ndarray], track: Track, all_samples: list[tuple[pygame.Vector2, float]], font: pygame.font.Font,
-                small: pygame.font.Font, model_label: str = "") -> None:
+                small: pygame.font.Font, model_label: str = "", architecture: list[int] | None = None) -> None:
     tile_x, tile_y = screen.get_width(), screen.get_height()
     screen.fill((25, 30, 38))
     pygame.draw.rect(screen, (44, 50, 60), pygame.Rect(0, 0, tile_x, tile_y), 1)
@@ -81,7 +83,8 @@ def render_tile(screen: pygame.Surface, frame: int, row: dict[str, str], feature
     screen.blit(map_surface, (8, 38))
     screen.blit(small.render(f"speed {speed:.1f}", True, (220, 225, 230)), (10, 190))
     hidden_count = len(hidden)
-    screen.blit(small.render(f"input 16  →  hidden {hidden_count}  →  output 3", True, (210, 215, 225)), (10, 215))
+    network_label = " -> ".join(str(value) for value in (architecture or [16, hidden_count, 3]))
+    screen.blit(small.render(f"network {network_label}", True, (210, 215, 225)), (10, 215))
     # Keep the network inside the 400 px tile, including output labels.
     input_x, hidden_x, output_x = 235, 270, 336
     input_nodes = [(input_x, 62 + i * 14) for i in range(16)]
@@ -161,7 +164,12 @@ def prune_policy(policy: NeuralPolicy, report: dict[str, object]) -> tuple[Neura
     if not keep:
         keep = [int(np.argmax(influence))]
     removed = [index for index in range(policy.w1.shape[1]) if index not in keep]
-    return NeuralPolicy(policy.w1[:, keep].copy(), policy.b1[keep].copy(), policy.w2[keep, :].copy(), policy.b2.copy()), keep, removed
+    weights = [weight.copy() for weight in policy.weights]
+    biases = [bias.copy() for bias in policy.biases]
+    weights[-2] = weights[-2][:, keep]
+    biases[-2] = biases[-2][keep]
+    weights[-1] = weights[-1][keep, :]
+    return NeuralPolicy(weights, biases), keep, removed
 
 
 def compare_models(full: NeuralPolicy, pruned: NeuralPolicy, rows: list[dict[str, str]]) -> dict[str, object]:
@@ -194,7 +202,7 @@ def write_animation(path: Path, frame_indices: np.ndarray, rows: list[dict[str, 
             for _ in range(2):
                 tile = pygame.Surface((400, 400))
                 render_tile(tile, int(frame_index), row, features, hidden, output,
-                            {"w1": model.w1, "w2": model.w2}, track, samples, font, small, label)
+                            {"w1": model.w1, "w2": model.w2}, track, samples, font, small, label, model.architecture)
                 image = pygame.transform.smoothscale(tile, (800, 800))
                 pygame.image.save(image, frame_dir / f"frame_{frame_number:04d}.png")
                 frame_number += 1
@@ -228,7 +236,7 @@ def main() -> None:
         row = rows[int(frame_index)]
         features, hidden, output = forward(policy, row)
         tile = pygame.Surface((400, 400))
-        render_tile(tile, int(frame_index), row, features, hidden, output, {"w1": policy.w1, "w2": policy.w2}, track, samples, font, small, "FULL")
+        render_tile(tile, int(frame_index), row, features, hidden, output, {"w1": policy.w1, "w2": policy.w2}, track, samples, font, small, "FULL", policy.architecture)
         screen.blit(tile, ((tile_index % 5) * 400, (tile_index // 5) * 400))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     pygame.image.save(screen, args.output)
@@ -238,7 +246,7 @@ def main() -> None:
     pruned.save(args.pruned_model)
     comparison = compare_models(policy, pruned, rows)
     report.update({"model": str(args.model), "map": str(args.map), "data": str(data_path),
-                   "architecture": [16, int(policy.w1.shape[1]), 3],
+                   "architecture": policy.architecture,
                    "pruned_model": str(args.pruned_model), "pruned_hidden_neurons": int(pruned.w1.shape[1]),
                    "removed_hidden_neurons": removed_indices, "kept_hidden_neurons": keep_indices,
                    "comparison": comparison, "animation": str(args.animation)})

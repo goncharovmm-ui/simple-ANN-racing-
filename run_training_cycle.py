@@ -14,7 +14,7 @@ from pathlib import Path
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
 from racing.batch import ParallelDaggerBatch
-from racing.neural import NeuralPolicy
+from racing.neural import NeuralPolicy, parse_hidden_sizes
 from racing.simulator import Track
 
 
@@ -48,6 +48,8 @@ def main() -> None:
     parser.add_argument("--cars-per-trajectory", type=int, default=7, help="collection cars allocated to each selected trajectory")
     parser.add_argument("--map-name", default=None, help="friendly map name stored in training history")
     parser.add_argument("--model-name", default=None, help="friendly model name stored in training history")
+    parser.add_argument("--hidden-layers", type=int, default=None, help="number of hidden layers")
+    parser.add_argument("--hidden-units", default=None, help="neurons per hidden layer: 64 or 128,64,32")
     parser.add_argument("--run-name", default="cycle", help="name used to isolate this experiment's DAgger data")
     parser.add_argument("--output", type=Path, default=Path("artifacts/training-history.json"))
     args = parser.parse_args()
@@ -55,24 +57,37 @@ def main() -> None:
     best_trajectories = max(1, args.best_trajectories)
     cars_per_trajectory = max(1, args.cars_per_trajectory)
     collection_agents = args.agents or best_trajectories * cars_per_trajectory
+    hidden_sizes = None if args.hidden_layers is None and args.hidden_units is None else parse_hidden_sizes(args.hidden_layers, args.hidden_units)
     model_dir = Path("models/cycle") / args.run_name
     policy_path = model_dir / "policy_000.npz"
     seed_sources = list(args.seed_data or [])
     if args.base_model and args.base_model.exists():
         if seed_sources:
             seed_command = [sys.executable, "train.py", *sum((["--data", str(path)] for path in seed_sources), []), "--output", str(policy_path), "--epochs", str(args.train_epochs), "--init-model", str(args.base_model)]
+            if hidden_sizes:
+                seed_command.extend(["--hidden-layers", str(len(hidden_sizes)), "--hidden-units", ",".join(map(str, hidden_sizes))])
             subprocess.run(seed_command, check=True)
         else:
             shutil.copy2(args.base_model, policy_path)
     elif seed_sources:
         seed_command = [sys.executable, "train.py", *sum((["--data", str(path)] for path in seed_sources), []), "--output", str(policy_path), "--epochs", str(args.train_epochs)]
+        if hidden_sizes:
+            seed_command.extend(["--hidden-layers", str(len(hidden_sizes)), "--hidden-units", ",".join(map(str, hidden_sizes))])
         subprocess.run(seed_command, check=True)
     else:
-        NeuralPolicy.random().save(policy_path)
+        NeuralPolicy.random(hidden_sizes=hidden_sizes or [64]).save(policy_path)
     best_policy: Path | None = None
     best_score: tuple[float, int, float] | None = None
+    history_hidden_sizes = hidden_sizes
+    if history_hidden_sizes is None and args.base_model and args.base_model.exists():
+        try:
+            history_hidden_sizes = NeuralPolicy.load(args.base_model).hidden_sizes
+        except (OSError, ValueError, KeyError):
+            history_hidden_sizes = [64]
     history = {"map_path": str(args.map), "map_name": args.map_name or track.name, "model_name": args.model_name or args.run_name,
-               "settings": {"epochs": args.epochs, "collection_agents": collection_agents, "best_trajectories": best_trajectories, "cars_per_trajectory": cars_per_trajectory},
+               "settings": {"epochs": args.epochs, "collection_agents": collection_agents, "best_trajectories": best_trajectories,
+                            "cars_per_trajectory": cars_per_trajectory, "hidden_layers": len(history_hidden_sizes or [64]),
+                            "hidden_units": history_hidden_sizes or [64]},
                "track": {"name": track.name, "road": list(track.road), "inner_grass": list(track.inner_grass), "start": list(track.start),
                "finish": list(track.finish), "obstacles": [list(rect) for rect in track.obstacles],
                "checkpoints": [list(point) for point in track.checkpoints]}, "epochs": []}
@@ -89,6 +104,8 @@ def main() -> None:
             sources.extend(["--data", str(Path("data/demos") / f"dagger-{args.run_name}-epoch-{previous:02d}")])
         next_policy = model_dir / f"policy_{epoch:03d}.npz"
         command = [sys.executable, "train.py", *sources, "--output", str(next_policy), "--epochs", str(args.train_epochs), "--init-model", str(policy_path)]
+        if hidden_sizes:
+            command.extend(["--hidden-layers", str(len(hidden_sizes)), "--hidden-units", ",".join(map(str, hidden_sizes))])
         print(f"Epoch {epoch}/{args.epochs}: collecting DAgger data with expert share {expert_probability:.0%}; training {next_policy}")
         subprocess.run(command, check=True)
         evaluation = ParallelDaggerBatch(track, NeuralPolicy.load(next_policy), args.map, agents=args.eval_agents, speed=100, display=False,
@@ -119,7 +136,7 @@ def main() -> None:
         args.output.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
         print(f"Epoch {epoch}/{args.epochs}: autonomous evaluation {finished}/{args.eval_agents}; {epoch_seconds:.1f}s; {'new best policy' if promoted else 'kept previous best'}")
     Path("models/policy.npz").write_bytes(policy_path.read_bytes())
-    print(f"Complete. Best policy: {policy_path}; history: {args.output}")
+    print(f"Complete. Best policy: {policy_path}; architecture: {NeuralPolicy.load(policy_path).architecture}; history: {args.output}")
 
 
 if __name__ == "__main__":
