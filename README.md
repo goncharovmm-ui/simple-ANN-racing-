@@ -84,7 +84,7 @@ python train.py --epochs 100
 python run_training_cycle.py --epochs 20 --agents 20 --run-name route-expert --output artifacts/training-history-route-expert.json
 ```
 
-Скрипт сохраняет отдельные DAgger-данные каждой эпохи, обучает новую модель после каждой из них и записывает `artifacts/training-history.json`. Затем создайте пятиминутный ролик:
+В каждой эпохе эксперт ведёт только часть машин: его доля плавно снижается с 85% до 10%, поэтому сеть постепенно берёт управление на себя, но получает примеры выхода из ошибок. Машины стартуют на случайных сегментах трассы. После обучения новая модель проходит отдельную полностью автономную оценку из 20 машин; только модель с лучшим числом финишей и средним временем становится следующей базовой моделью. Скрипт сохраняет отдельные DAgger-данные и модели по имени запуска, а также записывает историю. Затем создайте пятиминутный ролик:
 
 ```bash
 python make_training_movie.py --history artifacts/training-history-route-expert.json --output artifacts/training-progress-route-expert.mp4 --duration 300

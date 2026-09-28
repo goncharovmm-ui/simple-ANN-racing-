@@ -68,6 +68,33 @@ class Track:
                 return candidate, angle
         return self.start.copy(), self.start_angle
 
+    def random_route_start(self) -> tuple[pygame.Vector2, float, int]:
+        """Spawn on a random course segment, facing the next checkpoint.
+
+        This gives DAgger recovery examples across the entire circuit instead of
+        repeatedly teaching only the first corner after the start line.
+        """
+        if not self.checkpoints:
+            position, angle = self.random_start()
+            return position, angle, 0
+        target_index = random.randrange(len(self.checkpoints))
+        previous = self.start if target_index == 0 else self.checkpoints[target_index - 1]
+        target = self.checkpoints[target_index]
+        direction = target - previous
+        if direction.length_squared() == 0:
+            position, angle = self.random_start()
+            return position, angle, 0
+        direction = direction.normalize()
+        for _ in range(80):
+            distance = random.uniform(0.18, 0.72) * previous.distance_to(target)
+            candidate = previous + direction * distance + pygame.Vector2(random.uniform(-20, 20), random.uniform(-20, 20))
+            valid = self.road.collidepoint(candidate) and not self.inner_grass.collidepoint(candidate) and not any(rect.collidepoint(candidate) for rect in self.obstacles)
+            if valid:
+                angle = math.degrees(math.atan2(target.y - candidate.y, target.x - candidate.x)) + random.uniform(-16, 16)
+                return candidate, angle, target_index
+        position, angle = self.random_start()
+        return position, angle, 0
+
 
 @dataclass
 class Car:
@@ -168,12 +195,13 @@ def draw_track(screen: pygame.Surface, track: Track, next_checkpoint: int | None
 
 
 class RacingGame:
-    def __init__(self, track: Track, record: bool = False, screen: pygame.Surface | None = None, policy: NeuralPolicy | None = None, game_mode: str = "race", map_path: Path = Path("maps/default.json"), expert: ArtificialExpert | None = None, max_episodes: int | None = None, expert_controls: bool = False) -> None:
+    def __init__(self, track: Track, record: bool = False, screen: pygame.Surface | None = None, policy: NeuralPolicy | None = None, game_mode: str = "race", map_path: Path = Path("maps/default.json"), expert: ArtificialExpert | None = None, max_episodes: int | None = None, expert_controls: bool = False, route_random_start: bool = False) -> None:
         pygame.init()
         self.screen = screen if screen is not None else pygame.display.set_mode((WIDTH, HEIGHT))
         self.clock, self.font = pygame.time.Clock(), pygame.font.Font(None, 28)
         pygame.display.set_caption("Simple ANN Racing — manual data collection")
         self.track, self.recording, self.policy, self.expert, self.expert_controls = track, record, policy, expert, expert_controls
+        self.route_random_start = route_random_start
         self.game_mode, self.map_path = game_mode, map_path
         self.track_id = f"{map_path.stem}-{track.fingerprint()}"
         self.run_id = uuid4().hex
@@ -242,9 +270,12 @@ class RacingGame:
             self.writer = None
             self.run_id = uuid4().hex
             self.start_recording()
-        position, angle = self.track.random_start()
+        if self.route_random_start:
+            position, angle, initial_checkpoint = self.track.random_route_start()
+        else:
+            position, angle, initial_checkpoint = *self.track.random_start(), 0
         self.car = Car(position, angle)
-        self.next_checkpoint = self.progress = self.completed_laps = self.step = 0
+        self.next_checkpoint, self.progress, self.completed_laps, self.step = initial_checkpoint, 0, 0, 0
         self.awaiting_finish = False
         self.elapsed = self.lap_elapsed = 0.0
         self.collisions = 0
