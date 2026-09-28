@@ -12,14 +12,16 @@ from racing.simulator import HEIGHT, WIDTH, RacingGame, Track, draw_track
 class ParallelDaggerBatch:
     """Runs many independent DAgger rollouts at accelerated simulation speed."""
 
-    def __init__(self, track: Track, policy: NeuralPolicy, map_path: Path, agents: int = 20, speed: int = 8) -> None:
+    def __init__(self, track: Track, policy: NeuralPolicy, map_path: Path, agents: int = 20, speed: int = 8, display: bool = True, game_mode: str = "dagger", label_all: bool = False) -> None:
         pygame.init()
-        self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
-        pygame.display.set_caption("Simple ANN Racing — parallel DAgger")
+        self.display = display
+        self.screen = pygame.display.set_mode((WIDTH, HEIGHT)) if display else pygame.Surface((WIDTH, HEIGHT))
+        if display:
+            pygame.display.set_caption("Simple ANN Racing — parallel DAgger")
         self.clock, self.font = pygame.time.Clock(), pygame.font.Font(None, 27)
         self.track, self.speed = track, max(1, speed)
         self.games = [RacingGame(track, record=True, screen=pygame.Surface((WIDTH, HEIGHT)), policy=policy,
-                                 game_mode="dagger", map_path=map_path, expert=ArtificialExpert()) for _ in range(agents)]
+                                 game_mode=game_mode, map_path=map_path, expert=ArtificialExpert(label_all=label_all)) for _ in range(agents)]
         self.done = [False] * agents
 
     def step_game(self, game: RacingGame) -> bool:
@@ -35,6 +37,8 @@ class ParallelDaggerBatch:
         return False
 
     def draw(self) -> None:
+        if not self.display:
+            return
         draw_track(self.screen, self.track)
         finished = sum(self.done)
         successful = sum(game.successful_episodes for game in self.games)
@@ -57,15 +61,17 @@ class ParallelDaggerBatch:
         running = True
         try:
             while running and not all(self.done):
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
-                        running = False
+                if self.display:
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
+                            running = False
                 for _ in range(self.speed):
                     for index, game in enumerate(self.games):
                         if not self.done[index] and self.step_game(game):
                             self.done[index] = True
                 self.draw()
-                self.clock.tick(60)
+                if self.display:
+                    self.clock.tick(60)
         finally:
             for game, done in zip(self.games, self.done):
                 if game.writer:

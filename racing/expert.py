@@ -32,4 +32,6 @@ class ArtificialExpert:
         steering, throttle, handbrake = learner_action
         dangerous = float(np.min(lidar)) < 0.38
         differs = abs(steering) > 0.55 or throttle > 0.65 or handbrake
-        return dangerous or differs
+        return self.label_all or dangerous or differs
+    def __init__(self, label_all: bool = False) -> None:
+        self.label_all = label_all

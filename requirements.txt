@@ -1,2 +1,3 @@
 numpy>=1.26
 pygame-ce>=2.5
+imageio-ffmpeg>=0.6

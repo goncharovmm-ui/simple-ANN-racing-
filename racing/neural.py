@@ -24,6 +24,18 @@ class NeuralPolicy:
         with np.load(path) as data:
             return cls(data["w1"], data["b1"], data["w2"], data["b2"])
 
+    @classmethod
+    def random(cls, seed: int = 42, hidden_size: int = 64) -> "NeuralPolicy":
+        rng = np.random.default_rng(seed)
+        return cls(rng.normal(0, np.sqrt(2 / 16), (16, hidden_size)).astype(np.float32),
+                   np.zeros(hidden_size, dtype=np.float32),
+                   rng.normal(0, np.sqrt(2 / hidden_size), (hidden_size, 3)).astype(np.float32),
+                   np.zeros(3, dtype=np.float32))
+
+    def save(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(path, w1=self.w1, b1=self.b1, w2=self.w2, b2=self.b2)
+
     def predict(self, features: np.ndarray) -> np.ndarray:
         hidden = np.maximum(features @ self.w1 + self.b1, 0.0)
         raw = hidden @ self.w2 + self.b2

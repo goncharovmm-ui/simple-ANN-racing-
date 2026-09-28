@@ -3,3 +3,5 @@
 **/__pycache__/
 data/demos/
 models/*.npz
+models/**/*.npz
+artifacts/

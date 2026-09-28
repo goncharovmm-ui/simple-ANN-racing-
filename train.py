@@ -10,11 +10,13 @@ import numpy as np
 from racing.neural import make_features
 
 
-def load_demos(directory: Path) -> tuple[np.ndarray, np.ndarray]:
+def load_demos(directories: list[Path]) -> tuple[np.ndarray, np.ndarray]:
     rows_x, rows_y = [], []
-    files = [directory] if directory.is_file() else sorted(directory.rglob("*.csv"))
+    files = []
+    for directory in directories:
+        files.extend([directory] if directory.is_file() else sorted(directory.rglob("*.csv")))
     if not files:
-        raise ValueError(f"No CSV demonstrations in {directory}. Run: python main.py --record")
+        raise ValueError("No CSV demonstrations found. Run a player race or DAgger batch first.")
     for path in files:
         with path.open(encoding="utf-8", newline="") as handle:
             for row in csv.DictReader(handle):
@@ -47,14 +49,14 @@ def loss(x: np.ndarray, y: np.ndarray, params: dict[str, np.ndarray]) -> float:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train imitation-learning policy from racing demonstrations")
-    parser.add_argument("--data", type=Path, default=Path("data/demos"))
+    parser.add_argument("--data", type=Path, action="append", default=None, help="CSV file or directory; repeat for several datasets")
     parser.add_argument("--output", type=Path, default=Path("models/policy.npz"))
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--learning-rate", type=float, default=0.001)
     args = parser.parse_args()
 
-    x, y = load_demos(args.data)
+    x, y = load_demos(args.data or [Path("data/demos")])
     if len(x) < 100:
         raise ValueError(f"Only {len(x)} samples. Record at least a few complete laps before training.")
     rng = np.random.default_rng(42)
