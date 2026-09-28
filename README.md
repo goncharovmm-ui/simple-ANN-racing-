@@ -81,6 +81,8 @@ python main.py --mode race --driver ai --map maps/default.json
 python run_training_cycle.py --epochs 10 --agents 20 --eval-agents 20 --seed-data data/demos/race/<best.csv> --base-model models/policy.npz --run-name my-track-v1 --output artifacts/training-history-my-track-v1.json
 ```
 
+Для DAgger с двумя скрытыми слоями, например, добавьте `--hidden-layers 2 --hidden-units 64,32`.
+
 Запуск повтора из командной строки:
 
 ```bash
