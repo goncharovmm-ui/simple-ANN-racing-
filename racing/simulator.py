@@ -222,6 +222,16 @@ class RacingGame:
             values.append(min(distance, MAX_LIDAR_DISTANCE) / MAX_LIDAR_DISTANCE)
         return np.asarray(values, dtype=np.float32)
 
+    @staticmethod
+    def crossed_zone(point: pygame.Vector2, start: pygame.Vector2, end: pygame.Vector2, radius: float = 64.0) -> bool:
+        """Detect a gate crossed during this frame, not only the final position after a wall bounce."""
+        segment = end - start
+        length_squared = segment.length_squared()
+        if length_squared == 0:
+            return point.distance_to(end) <= radius
+        factor = max(0.0, min(1.0, (point - start).dot(segment) / length_squared))
+        return point.distance_to(start + segment * factor) <= radius
+
     def reset(self, reason: str) -> None:
         if self.writer:
             if self.writer.committed:
@@ -258,6 +268,7 @@ class RacingGame:
             throttle = float(keys[pygame.K_UP] or keys[pygame.K_w]) - float(keys[pygame.K_DOWN] or keys[pygame.K_s])
             handbrake = bool(keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT])
         self.car.update(steering, throttle, handbrake, dt)
+        movement_start, movement_end = self.car.last_position.copy(), self.car.position.copy()
         self.trajectory.append(self.car.position.copy())
         self.elapsed += dt
         self.lap_elapsed += dt
@@ -276,13 +287,13 @@ class RacingGame:
                 self.message = "Game over: 5 wall hits — press R/К for a new attempt"
             else:
                 self.message = f"Wall hit: speed reduced ({self.collisions}/5)"
-        if self.track.checkpoints and not self.awaiting_finish and self.car.position.distance_to(self.track.checkpoints[self.next_checkpoint]) < 58:
+        if self.track.checkpoints and not self.awaiting_finish and self.crossed_zone(self.track.checkpoints[self.next_checkpoint], movement_start, movement_end):
             self.progress += 1
             self.next_checkpoint += 1
             if self.next_checkpoint == len(self.track.checkpoints):
                 self.awaiting_finish = True
                 self.message = "All checkpoints passed — head to the finish"
-        if self.awaiting_finish and self.car.position.distance_to(self.track.finish) < 58:
+        if self.awaiting_finish and self.crossed_zone(self.track.finish, movement_start, movement_end):
             self.completed_laps += 1
             self.last_lap = self.lap_elapsed
             self.best_lap = self.last_lap if self.best_lap is None else min(self.best_lap, self.last_lap)
