@@ -61,7 +61,7 @@ class Car:
     position: pygame.Vector2
     angle: float
     velocity: pygame.Vector2 = field(default_factory=pygame.Vector2)
-    crashed: bool = False
+    last_position: pygame.Vector2 = field(default_factory=pygame.Vector2, init=False)
 
     @property
     def speed(self) -> float:
@@ -73,8 +73,6 @@ class Car:
 
     def update(self, steering: float, throttle: float, handbrake: bool, dt: float) -> None:
         """Arcade model: handbrake preserves lateral momentum to make a drift."""
-        if self.crashed:
-            return
         steering, throttle = max(-1.0, min(1.0, steering)), max(-1.0, min(1.0, throttle))
         forward = self.heading()
         side = pygame.Vector2(-forward.y, forward.x)
@@ -84,16 +82,25 @@ class Car:
         lateral_speed *= math.exp(-(0.42 if handbrake else 7.5) * dt)
         forward = self.heading()
         self.velocity = forward * forward_speed + pygame.Vector2(-forward.y, forward.x) * lateral_speed
+        self.last_position = self.position.copy()
         self.position += self.velocity * dt
+
+    def hit_wall(self) -> None:
+        self.position = self.last_position.copy()
+        self.velocity *= -0.18
 
 
 class DemoWriter:
-    fields = ["run_id", "mode", "driver", "track_id", "map_path", "episode", "step", "x", "y", "angle", "speed", "next_checkpoint", "progress", "elapsed_s", "lap_s", "fitness", "steering", "throttle", "handbrake", *[f"lidar_{i}" for i in range(len(LIDAR_ANGLES))]]
+    fields = ["run_id", "mode", "driver", "track_id", "map_path", "episode", "step", "x", "y", "angle", "speed", "next_checkpoint", "progress", "collisions", "elapsed_s", "lap_s", "fitness", "steering", "throttle", "handbrake", *[f"lidar_{i}" for i in range(len(LIDAR_ANGLES))]]
 
     def __init__(self, directory: Path, metadata: dict[str, str]) -> None:
-        directory.mkdir(parents=True, exist_ok=True)
+        pending = Path("data/demos/_pending")
+        pending.mkdir(parents=True, exist_ok=True)
         self.metadata = metadata
-        self.path = directory / f"{metadata['driver']}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{metadata['run_id'][:8]}.csv"
+        filename = f"{metadata['driver']}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{metadata['run_id'][:8]}.csv"
+        self.path = pending / filename
+        self.final_path = directory / filename
+        self.committed = False
         self.file = self.path.open("w", newline="", encoding="utf-8")
         self.writer = csv.DictWriter(self.file, fieldnames=self.fields)
         self.writer.writeheader()
@@ -102,13 +109,28 @@ class DemoWriter:
         car = game.car
         row = {**self.metadata, "episode": game.episode, "step": game.step, "x": round(car.position.x, 3), "y": round(car.position.y, 3),
                "angle": round(car.angle, 3), "speed": round(car.speed, 3), "next_checkpoint": game.next_checkpoint,
-               "progress": game.progress, "elapsed_s": round(game.elapsed, 3), "lap_s": round(game.lap_elapsed, 3),
+               "progress": game.progress, "collisions": game.collisions, "elapsed_s": round(game.elapsed, 3), "lap_s": round(game.lap_elapsed, 3),
                "fitness": round(game.fitness, 3), "steering": round(steering, 3), "throttle": round(throttle, 3), "handbrake": int(handbrake)}
         row.update({f"lidar_{i}": round(float(v), 4) for i, v in enumerate(lidar)})
         self.writer.writerow(row)
 
     def close(self) -> None:
         self.file.close()
+
+    def commit(self) -> None:
+        if self.committed:
+            return
+        self.file.close()
+        self.final_path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.replace(self.final_path)
+        self.path = self.final_path
+        self.file = self.path.open("a", newline="", encoding="utf-8")
+        self.writer = csv.DictWriter(self.file, fieldnames=self.fields)
+        self.committed = True
+
+    def discard(self) -> None:
+        self.file.close()
+        self.path.unlink(missing_ok=True)
 
 
 def draw_track(screen: pygame.Surface, track: Track, next_checkpoint: int | None = None) -> None:
@@ -134,6 +156,8 @@ class RacingGame:
         self.track_id = f"{map_path.stem}-{track.fingerprint()}"
         self.run_id = uuid4().hex
         self.writer: DemoWriter | None = None
+        self.collisions = 0
+        self.game_over = False
         if record:
             self.start_recording()
         self.best_lap: float | None = None
@@ -151,7 +175,7 @@ class RacingGame:
 
     @property
     def fitness(self) -> float:
-        return self.completed_laps * 10_000 + self.progress * 1_000 - self.elapsed * 10
+        return self.completed_laps * 10_000 + self.progress * 1_000 - self.elapsed * 10 - self.collisions * 250
 
     def is_road(self, point: pygame.Vector2) -> bool:
         return self.track.road.collidepoint(point) and not self.track.inner_grass.collidepoint(point) and not any(r.collidepoint(point) for r in self.track.obstacles)
@@ -172,13 +196,25 @@ class RacingGame:
         return np.asarray(values, dtype=np.float32)
 
     def reset(self, reason: str) -> None:
+        if self.writer:
+            if self.writer.committed:
+                self.writer.close()
+            else:
+                self.writer.discard()
+            self.writer = None
+            self.run_id = uuid4().hex
+            self.start_recording()
         self.car = Car(self.track.start.copy(), self.track.start_angle)
         self.next_checkpoint = self.progress = self.completed_laps = self.step = 0
         self.elapsed = self.lap_elapsed = 0.0
+        self.collisions = 0
+        self.game_over = False
         self.last_lap: float | None = None
         self.message = reason
 
     def update(self, dt: float) -> tuple[float, float, bool, np.ndarray]:
+        if self.game_over:
+            return 0.0, 0.0, False, self.raycast()
         keys = pygame.key.get_pressed()
         if self.policy:
             steering, throttle, handbrake = self.policy.act(self.raycast(), self.car.speed)
@@ -190,7 +226,13 @@ class RacingGame:
         self.elapsed += dt
         self.lap_elapsed += dt
         if not all(self.is_road(point) for point in self.car_points()):
-            self.car.crashed, self.message = True, "Collision — press R/К to restart"
+            self.car.hit_wall()
+            self.collisions += 1
+            if self.collisions >= 5:
+                self.game_over = True
+                self.message = "Game over: 5 wall hits — press R/К for a new attempt"
+            else:
+                self.message = f"Wall hit: speed reduced ({self.collisions}/5)"
         if self.track.checkpoints and self.car.position.distance_to(self.track.checkpoints[self.next_checkpoint]) < 58:
             self.progress += 1
             self.next_checkpoint = (self.next_checkpoint + 1) % len(self.track.checkpoints)
@@ -198,7 +240,12 @@ class RacingGame:
                 self.completed_laps += 1
                 self.last_lap = self.lap_elapsed
                 self.best_lap = self.last_lap if self.best_lap is None else min(self.best_lap, self.last_lap)
-                self.lap_elapsed, self.message = 0.0, f"Lap {self.completed_laps}: {self.last_lap:.2f}s"
+                self.lap_elapsed = 0.0
+                if self.writer and not self.writer.committed:
+                    self.writer.commit()
+                    self.message = f"Lap {self.completed_laps}: {self.last_lap:.2f}s — run saved"
+                else:
+                    self.message = f"Lap {self.completed_laps}: {self.last_lap:.2f}s"
         return steering, throttle, handbrake, self.raycast()
 
     def draw(self, lidar: np.ndarray) -> None:
@@ -207,12 +254,12 @@ class RacingGame:
             radians = math.radians(self.car.angle + float(angle))
             endpoint = self.car.position + pygame.Vector2(math.cos(radians), math.sin(radians)) * distance * MAX_LIDAR_DISTANCE
             pygame.draw.line(self.screen, (99, 197, 238), self.car.position, endpoint, 1)
-        pygame.draw.polygon(self.screen, (76, 172, 247) if not self.car.crashed else (130, 40, 40), self.car_points())
+        pygame.draw.polygon(self.screen, (76, 172, 247), self.car_points())
         pygame.draw.circle(self.screen, (250, 250, 250), self.car.position + self.car.heading() * 10, 3)
         best = "--" if self.best_lap is None else f"{self.best_lap:.2f}s"
         lines = [f"Lap {self.completed_laps + 1}: {self.lap_elapsed:.2f}s | best: {best} | score: {self.fitness:.0f}",
-                 f"checkpoints {self.progress} | speed {self.car.speed:5.1f} | mode: {'AI' if self.policy else 'manual'}",
-                 "WASD/arrows — drive   Shift — drift   R/К — restart   Space — recording   Esc — quit", self.message]
+                 f"checkpoints {self.progress} | speed {self.car.speed:5.1f} | hits {self.collisions} | mode: {'AI' if self.policy else 'manual'}",
+                 "WASD/arrows — drive   Shift — drift   R/К — restart   Esc — quit", self.message]
         for i, line in enumerate(lines):
             self.screen.blit(self.font.render(line, True, (250, 250, 250) if i < 3 else (255, 226, 102)), (24, 20 + i * 30))
         pygame.display.flip()
@@ -228,24 +275,21 @@ class RacingGame:
                         if event.key == pygame.K_ESCAPE: running = False
                         elif event.key == pygame.K_r or event.unicode.lower() == "к":
                             self.reset("Restarted"); self.episode += 1
-                        elif event.key == pygame.K_SPACE and not self.policy:
-                            if self.writer is None:
-                                self.start_recording()
-                            else:
-                                self.recording = not self.recording
-                            self.message = f"Recording {'enabled' if self.recording else 'paused'}"
                 steering, throttle, handbrake, lidar = self.update(dt)
-                if self.recording and not self.car.crashed and self.writer:
+                if self.recording and self.writer:
                     self.writer.write(self, steering, throttle, handbrake, lidar)
                 self.step += 1
                 self.draw(lidar)
         finally:
             if self.writer:
-                self.writer.close(); print(f"Saved demonstrations to {self.writer.path}")
+                if self.writer.committed:
+                    self.writer.close(); print(f"Saved demonstrations to {self.writer.path}")
+                else:
+                    self.writer.discard(); print("Discarded incomplete demonstration run")
             pygame.quit()
 
 
-class MapEditor:
+class LegacyMapEditor:
     def __init__(self, track: Track, save_path: Path) -> None:
         pygame.init()
         self.screen, self.clock, self.font = pygame.display.set_mode((WIDTH, HEIGHT)), pygame.time.Clock(), pygame.font.Font(None, 25)
@@ -308,6 +352,146 @@ class MapEditor:
                         elif event.key == pygame.K_x or event.unicode.lower() == "ч":
                             if self.track.checkpoints: self.track.checkpoints.pop(); self.message = "Last checkpoint removed"
                         elif event.key == pygame.K_s or event.unicode.lower() == "ы": self.track.start = mouse; self.message = "Start moved"
+                if self.testing:
+                    assert self.preview_game is not None
+                    steering, throttle, handbrake, lidar = self.preview_game.update(dt)
+                    self.preview_game.step += 1
+                    self.preview_game.draw(lidar)
+                else:
+                    self.draw()
+        finally:
+            pygame.quit()
+
+
+class MapEditor:
+    """Button-driven sandbox: mouse moves objects, while tools create/delete them."""
+
+    def __init__(self, track: Track, save_path: Path) -> None:
+        pygame.init()
+        self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
+        self.clock, self.font = pygame.time.Clock(), pygame.font.Font(None, 23)
+        pygame.display.set_caption("Simple ANN Racing — track sandbox")
+        self.track, self.save_path = track, save_path
+        self.testing = False
+        self.preview_game: RacingGame | None = None
+        self.tool = "move"
+        self.dragging: tuple[str, int | None] | None = None
+        self.message = "Select a tool, then click the map. Drag objects in Move mode."
+        names = [("move", "Move"), ("obstacle", "Add obstacle"), ("checkpoint", "Add checkpoint"),
+                 ("start", "Set start"), ("delete", "Delete"), ("save", "Save map"), ("test", "Test track")]
+        self.buttons = [(action, label, pygame.Rect(10 + index * 180, 14, 170, 42)) for index, (action, label) in enumerate(names)]
+
+    def draw_toolbar(self) -> None:
+        for action, label, rect in self.buttons:
+            selected = action == self.tool and action not in ("save", "test")
+            color = (58, 117, 168) if selected else (54, 61, 72)
+            pygame.draw.rect(self.screen, color, rect, border_radius=7)
+            pygame.draw.rect(self.screen, (245, 205, 80) if selected else (184, 190, 198), rect, 2, border_radius=7)
+            text = self.font.render(label, True, (255, 255, 255))
+            self.screen.blit(text, text.get_rect(center=rect.center))
+
+    def draw(self) -> None:
+        draw_track(self.screen, self.track)
+        pygame.draw.circle(self.screen, (90, 188, 255), self.track.start, 12)
+        direction = pygame.Vector2(math.cos(math.radians(self.track.start_angle)), math.sin(math.radians(self.track.start_angle)))
+        pygame.draw.line(self.screen, (250, 250, 250), self.track.start, self.track.start + direction * 25, 3)
+        self.draw_toolbar()
+        details = f"{self.tool.upper()} | checkpoints: {len(self.track.checkpoints)} | obstacles: {len(self.track.obstacles)} | {self.message}"
+        self.screen.blit(self.font.render(details, True, (255, 230, 115)), (14, 64))
+        pygame.display.flip()
+
+    def toggle_test(self) -> None:
+        self.testing = True
+        self.preview_game = RacingGame(self.track, record=False, screen=self.screen, game_mode="sandbox_test", map_path=self.save_path)
+        self.message = "Test mode — Esc returns to sandbox"
+
+    def object_at(self, position: tuple[int, int]) -> tuple[str, int | None] | None:
+        for index in range(len(self.track.obstacles) - 1, -1, -1):
+            if self.track.obstacles[index].collidepoint(position):
+                return "obstacle", index
+        for index in range(len(self.track.checkpoints) - 1, -1, -1):
+            if self.track.checkpoints[index].distance_to(position) <= 15:
+                return "checkpoint", index
+        if self.track.start.distance_to(position) <= 16:
+            return "start", None
+        return None
+
+    def handle_tool(self, position: tuple[int, int]) -> None:
+        for action, _, rect in self.buttons:
+            if rect.collidepoint(position):
+                if action == "save":
+                    self.track.save(self.save_path)
+                    self.message = f"Saved: {self.save_path}"
+                elif action == "test":
+                    self.toggle_test()
+                else:
+                    self.tool = action
+                    self.message = f"Selected: {action}"
+                return
+        if position[1] < 80:
+            return
+        point = pygame.Vector2(position)
+        if self.tool == "obstacle":
+            self.track.obstacles.append(pygame.Rect(round(point.x - 30), round(point.y - 20), 60, 40))
+            self.message = "Obstacle added — use Move to position it"
+        elif self.tool == "checkpoint":
+            self.track.checkpoints.append(point)
+            self.message = "Checkpoint added"
+        elif self.tool == "start":
+            self.track.start = point
+            self.message = "Start moved"
+        elif self.tool == "delete":
+            found = self.object_at(position)
+            if found is None:
+                self.message = "Nothing to delete here"
+            elif found[0] == "obstacle":
+                self.track.obstacles.pop(found[1])
+                self.message = "Obstacle deleted"
+            elif found[0] == "checkpoint":
+                self.track.checkpoints.pop(found[1])
+                self.message = "Checkpoint deleted"
+            else:
+                self.message = "The start point cannot be deleted; use Set start instead"
+        elif self.tool == "move":
+            self.dragging = self.object_at(position)
+            self.message = "Dragging object" if self.dragging else "Choose an object to move"
+
+    def move_dragged(self, position: tuple[int, int]) -> None:
+        if not self.dragging:
+            return
+        kind, index = self.dragging
+        point = pygame.Vector2(position)
+        if kind == "obstacle":
+            self.track.obstacles[index].center = (round(point.x), round(point.y))
+        elif kind == "checkpoint":
+            self.track.checkpoints[index] = point
+        else:
+            self.track.start = point
+
+    def run(self) -> None:
+        running = True
+        try:
+            while running:
+                dt = min(self.clock.tick(60) / 1000.0, 0.05)
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        running = False
+                    elif self.testing:
+                        if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                            self.testing, self.preview_game = False, None
+                            self.message = "Back in sandbox"
+                        elif event.type == pygame.KEYDOWN and (event.key == pygame.K_r or event.unicode.lower() == "к"):
+                            assert self.preview_game is not None
+                            self.preview_game.reset("Restarted")
+                            self.preview_game.episode += 1
+                    elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                        running = False
+                    elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                        self.handle_tool(event.pos)
+                    elif event.type == pygame.MOUSEMOTION and event.buttons[0]:
+                        self.move_dragged(event.pos)
+                    elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                        self.dragging = None
                 if self.testing:
                     assert self.preview_game is not None
                     steering, throttle, handbrake, lidar = self.preview_game.update(dt)

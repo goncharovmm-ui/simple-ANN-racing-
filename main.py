@@ -8,7 +8,7 @@ from racing.simulator import MapEditor, RacingGame, Track
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="2D racing simulator and demonstration collector")
-    parser.add_argument("--record", action="store_true", help="start recording manual demonstrations")
+    parser.add_argument("--record", action="store_true", help="kept for compatibility; player races record automatically")
     parser.add_argument("--editor", action="store_true", help="open the track sandbox/editor (shortcut)")
     parser.add_argument("--mode", choices=("sandbox", "race"), help="skip menu and open a mode")
     parser.add_argument("--driver", choices=("player", "ai"), default="player", help="race driver when --mode race is used")
@@ -30,7 +30,7 @@ def main() -> None:
         use_ai = bool(args.ai) or args.driver == "ai"
         if use_ai and not policy_path.exists():
             parser.error(f"No neural policy at {policy_path}. Record demonstrations and run: python train.py")
-        RacingGame(track, record=args.record, policy=NeuralPolicy.load(policy_path) if use_ai else None, map_path=args.map).run()
+        RacingGame(track, record=not use_ai, policy=NeuralPolicy.load(policy_path) if use_ai else None, map_path=args.map).run()
 
 
 if __name__ == "__main__":
