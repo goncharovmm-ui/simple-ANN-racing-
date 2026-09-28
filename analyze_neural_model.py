@@ -1,10 +1,11 @@
-"""Create a ten-frame activation montage and hidden-neuron ablation report."""
+"""Create an activation montage, prune weak hidden units, and make a toggle animation."""
 from __future__ import annotations
 
 import argparse
 import csv
 import json
 import math
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -52,12 +53,22 @@ def node_color(value: float, positive: tuple[int, int, int], negative: tuple[int
     return tuple(round(base * (0.25 + 0.75 * amount) + 22 * (1 - amount)) for base in positive)
 
 
+def signal_alpha(value: float, floor: int = 5) -> int:
+    """Map signal strength to alpha; weak activations should visually recede."""
+    amount = max(0.0, min(1.0, abs(float(value))))
+    return round(floor + (255 - floor) * amount ** 1.8)
+
+
 def render_tile(screen: pygame.Surface, frame: int, row: dict[str, str], features: np.ndarray, hidden: np.ndarray, output: np.ndarray,
-                weights: dict[str, np.ndarray], track: Track, all_samples: list[tuple[pygame.Vector2, float]], font: pygame.font.Font, small: pygame.font.Font) -> None:
+                weights: dict[str, np.ndarray], track: Track, all_samples: list[tuple[pygame.Vector2, float]], font: pygame.font.Font,
+                small: pygame.font.Font, model_label: str = "") -> None:
     tile_x, tile_y = screen.get_width(), screen.get_height()
     screen.fill((25, 30, 38))
     pygame.draw.rect(screen, (44, 50, 60), pygame.Rect(0, 0, tile_x, tile_y), 1)
-    screen.blit(font.render(f"frame {frame + 1}", True, (245, 245, 245)), (10, 8))
+    title = f"frame {frame + 1}"
+    if model_label:
+        title += f"  •  {model_label}"
+    screen.blit(font.render(title, True, (245, 245, 245)), (10, 8))
     position = pygame.Vector2(float(row["x"]), float(row["y"]))
     speed = float(row.get("speed") or 0.0)
     map_source = pygame.Surface((WIDTH, HEIGHT))
@@ -69,10 +80,13 @@ def render_tile(screen: pygame.Surface, frame: int, row: dict[str, str], feature
     pygame.draw.circle(map_surface, speed_color(speed), (round(position.x * 220 / WIDTH), round(position.y * 145 / HEIGHT)), 5)
     screen.blit(map_surface, (8, 38))
     screen.blit(small.render(f"speed {speed:.1f}", True, (220, 225, 230)), (10, 190))
-    screen.blit(small.render("input 16  →  hidden 64  →  output 3", True, (210, 215, 225)), (10, 215))
-    input_x, hidden_x, output_x = 255, 318, 378
+    hidden_count = len(hidden)
+    screen.blit(small.render(f"input 16  →  hidden {hidden_count}  →  output 3", True, (210, 215, 225)), (10, 215))
+    # Keep the network inside the 400 px tile, including output labels.
+    input_x, hidden_x, output_x = 235, 270, 336
     input_nodes = [(input_x, 62 + i * 14) for i in range(16)]
-    hidden_nodes = [(hidden_x + (i % 8) * 9, 64 + (i // 8) * 28) for i in range(64)]
+    hidden_columns = 8
+    hidden_nodes = [(hidden_x + (i % hidden_columns) * 8, 64 + (i // hidden_columns) * 28) for i in range(hidden_count)]
     output_nodes = [(output_x, 105 + i * 70) for i in range(3)]
     contributions = features[:, None] * weights["w1"]
     edge_surface = pygame.Surface((tile_x, tile_y), pygame.SRCALPHA)
@@ -80,29 +94,36 @@ def render_tile(screen: pygame.Surface, frame: int, row: dict[str, str], feature
     for input_index, source in enumerate(input_nodes):
         for hidden_index, target in enumerate(hidden_nodes):
             amount = min(1.0, abs(float(contributions[input_index, hidden_index])) / contribution_scale)
-            if amount < 0.08:
+            if amount < 0.04:
                 continue
-            color = (70, 220, 130, round(25 + 150 * amount)) if contributions[input_index, hidden_index] >= 0 else (235, 90, 90, round(25 + 150 * amount))
+            color = (70, 220, 130, signal_alpha(amount)) if contributions[input_index, hidden_index] >= 0 else (235, 90, 90, signal_alpha(amount))
             pygame.draw.line(edge_surface, color, source, target, 1)
     hidden_output = hidden[:, None] * weights["w2"]
     output_scale = max(0.001, float(np.percentile(np.abs(hidden_output), 95)))
     for hidden_index, source in enumerate(hidden_nodes):
         for output_index, target in enumerate(output_nodes):
             amount = min(1.0, abs(float(hidden_output[hidden_index, output_index])) / output_scale)
-            if amount < 0.08:
+            if amount < 0.04:
                 continue
-            color = (70, 220, 130, round(35 + 170 * amount)) if hidden_output[hidden_index, output_index] >= 0 else (235, 90, 90, round(35 + 170 * amount))
+            color = (70, 220, 130, signal_alpha(amount)) if hidden_output[hidden_index, output_index] >= 0 else (235, 90, 90, signal_alpha(amount))
             pygame.draw.line(edge_surface, color, source, target, 1)
     screen.blit(edge_surface, (0, 0))
+    node_surface = pygame.Surface((tile_x, tile_y), pygame.SRCALPHA)
     for index, (x, y) in enumerate(input_nodes):
-        pygame.draw.circle(screen, node_color(features[index], (80, 180, 240)), (x, y), 4)
+        color = (*node_color(features[index], (80, 180, 240)), signal_alpha(features[index], 24))
+        pygame.draw.circle(node_surface, color, (x, y), 4)
     hidden_scale = max(0.001, float(np.percentile(hidden, 95)))
     for index, (x, y) in enumerate(hidden_nodes):
-        pygame.draw.circle(screen, node_color(hidden[index] / hidden_scale, (235, 190, 70)), (x, y), 4)
+        normalized = hidden[index] / hidden_scale
+        color = (*node_color(normalized, (235, 190, 70)), signal_alpha(normalized, 18))
+        pygame.draw.circle(node_surface, color, (x, y), 4)
     for index, (x, y) in enumerate(output_nodes):
-        pygame.draw.circle(screen, node_color(output[index], (80, 220, 130)), (x, y), 8)
+        color = (*node_color(output[index], (80, 220, 130)), signal_alpha(output[index], 45))
+        pygame.draw.circle(node_surface, color, (x, y), 8)
+    screen.blit(node_surface, (0, 0))
+    for index, (x, y) in enumerate(output_nodes):
         label = ["steer", "gas", "brake"][index]
-        screen.blit(small.render(f"{label} {output[index]:+.2f}", True, (235, 240, 245)), (390, y - 8))
+        screen.blit(small.render(f"{label} {output[index]:+.2f}", True, (235, 240, 245)), (338, y - 8))
     screen.blit(small.render("L0…L14, S", True, (185, 195, 205)), (245, 300))
 
 
@@ -124,9 +145,64 @@ def ablation_report(policy: NeuralPolicy, rows: list[dict[str, str]]) -> dict[st
     active_fraction = np.mean(hidden_array > 1e-6, axis=0)
     ranking = np.argsort(influence)[::-1]
     threshold = max(1e-5, max(influence) * 0.05)
-    return {"samples": len(rows), "hidden_neurons": len(influence), "effective_at_5_percent": int(sum(value >= threshold for value in influence)),
+    return {"samples": len(rows), "hidden_neurons": len(influence),
+            "effective_at_5_percent": int(sum(value >= threshold for value in influence)),
+            "prune_threshold": round(float(threshold), 8),
+            "influence": [round(float(value), 8) for value in influence],
             "top_neurons": [{"index": int(index), "influence": round(influence[index], 6), "active_fraction": round(float(active_fraction[index]), 4)} for index in ranking[:15]],
             "influence_mean": round(float(np.mean(influence)), 6), "influence_max": round(float(np.max(influence)), 6)}
+
+
+def prune_policy(policy: NeuralPolicy, report: dict[str, object]) -> tuple[NeuralPolicy, list[int], list[int]]:
+    """Remove hidden units whose single-unit ablation changes output by <5% of max."""
+    influence = np.asarray(report["influence"], dtype=np.float32)
+    threshold = float(report["prune_threshold"])
+    keep = [int(index) for index, value in enumerate(influence) if value >= threshold]
+    if not keep:
+        keep = [int(np.argmax(influence))]
+    removed = [index for index in range(policy.w1.shape[1]) if index not in keep]
+    return NeuralPolicy(policy.w1[:, keep].copy(), policy.b1[keep].copy(), policy.w2[keep, :].copy(), policy.b2.copy()), keep, removed
+
+
+def compare_models(full: NeuralPolicy, pruned: NeuralPolicy, rows: list[dict[str, str]]) -> dict[str, object]:
+    full_outputs = np.asarray([forward(full, row)[2] for row in rows], dtype=np.float32)
+    pruned_outputs = np.asarray([forward(pruned, row)[2] for row in rows], dtype=np.float32)
+    difference = np.abs(full_outputs - pruned_outputs)
+    return {
+        "mean_abs_output_difference": round(float(np.mean(difference)), 8),
+        "max_abs_output_difference": round(float(np.max(difference)), 8),
+        "steering_mae": round(float(np.mean(difference[:, 0])), 8),
+        "throttle_mae": round(float(np.mean(difference[:, 1])), 8),
+        "handbrake_probability_mae": round(float(np.mean(difference[:, 2])), 8),
+        "handbrake_decision_agreement": round(float(np.mean((full_outputs[:, 2] >= 0.5) == (pruned_outputs[:, 2] >= 0.5))), 6),
+    }
+
+
+def write_animation(path: Path, frame_indices: np.ndarray, rows: list[dict[str, str]], samples: list[tuple[pygame.Vector2, float]],
+                    track: Track, full: NeuralPolicy, pruned: NeuralPolicy) -> None:
+    """Write a short MP4 that alternates full and pruned network at each trajectory point."""
+    import imageio_ffmpeg
+
+    frame_dir = path.parent / f"{path.stem}-frames"
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    font, small = pygame.font.Font(None, 25), pygame.font.Font(None, 16)
+    frame_number = 0
+    for frame_index in frame_indices:
+        row = rows[int(frame_index)]
+        for label, model in ((f"FULL • {full.w1.shape[1]} neurons", full), (f"PRUNED • {pruned.w1.shape[1]} neurons", pruned)):
+            features, hidden, output = forward(model, row)
+            for _ in range(2):
+                tile = pygame.Surface((400, 400))
+                render_tile(tile, int(frame_index), row, features, hidden, output,
+                            {"w1": model.w1, "w2": model.w2}, track, samples, font, small, label)
+                image = pygame.transform.smoothscale(tile, (800, 800))
+                pygame.image.save(image, frame_dir / f"frame_{frame_number:04d}.png")
+                frame_number += 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    command = [ffmpeg, "-y", "-framerate", "2", "-i", str(frame_dir / "frame_%04d.png"),
+               "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(path)]
+    subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
 def main() -> None:
@@ -136,6 +212,8 @@ def main() -> None:
     parser.add_argument("--data", type=Path)
     parser.add_argument("--output", type=Path, default=Path("artifacts/neural-analysis.png"))
     parser.add_argument("--report", type=Path, default=Path("artifacts/neural-analysis.json"))
+    parser.add_argument("--pruned-model", type=Path, default=Path("artifacts/neural-analysis-pruned.npz"))
+    parser.add_argument("--animation", type=Path, default=Path("artifacts/neural-analysis-toggle.mp4"))
     args = parser.parse_args()
     pygame.init()
     track = Track.load(args.map)
@@ -150,17 +228,26 @@ def main() -> None:
         row = rows[int(frame_index)]
         features, hidden, output = forward(policy, row)
         tile = pygame.Surface((400, 400))
-        render_tile(tile, int(frame_index), row, features, hidden, output, {"w1": policy.w1, "w2": policy.w2}, track, samples, font, small)
+        render_tile(tile, int(frame_index), row, features, hidden, output, {"w1": policy.w1, "w2": policy.w2}, track, samples, font, small, "FULL")
         screen.blit(tile, ((tile_index % 5) * 400, (tile_index // 5) * 400))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     pygame.image.save(screen, args.output)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     report = ablation_report(policy, rows)
-    report.update({"model": str(args.model), "map": str(args.map), "data": str(data_path), "architecture": [16, int(policy.w1.shape[1]), 3]})
+    pruned, keep_indices, removed_indices = prune_policy(policy, report)
+    pruned.save(args.pruned_model)
+    comparison = compare_models(policy, pruned, rows)
+    report.update({"model": str(args.model), "map": str(args.map), "data": str(data_path),
+                   "architecture": [16, int(policy.w1.shape[1]), 3],
+                   "pruned_model": str(args.pruned_model), "pruned_hidden_neurons": int(pruned.w1.shape[1]),
+                   "removed_hidden_neurons": removed_indices, "kept_hidden_neurons": keep_indices,
+                   "comparison": comparison, "animation": str(args.animation)})
     args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_animation(args.animation, frame_indices, rows, samples, track, policy, pruned)
     pygame.quit()
     print(f"Saved {args.output}")
-    print(json.dumps({key: report[key] for key in ("samples", "architecture", "effective_at_5_percent", "influence_max")}, ensure_ascii=False))
+    print(json.dumps({key: report[key] for key in ("samples", "architecture", "effective_at_5_percent", "influence_max",
+                                                   "pruned_hidden_neurons", "comparison", "pruned_model", "animation")}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

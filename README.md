@@ -82,10 +82,15 @@ python main.py --mode replay --model models/cycle/my-track-v1/policy_005.npz --m
 Для анализа внутренней работы сети можно построить десятикадровый монтаж и отчёт абляции:
 
 ```bash
-python analyze_neural_model.py --model /path/to/model.npz --map maps/default.json --output artifacts/neural-analysis.png --report artifacts/neural-analysis.json
+python analyze_neural_model.py --model /path/to/model.npz --map maps/default.json \
+  --output artifacts/neural-analysis.png --report artifacts/neural-analysis.json \
+  --pruned-model artifacts/neural-analysis-pruned.npz \
+  --animation artifacts/neural-analysis-toggle.mp4
 ```
 
 Монтаж показывает карту, машину, 16 входов, 64 скрытых нейрона, 3 выхода и цветом подсвеченные вклады связей. В JSON `effective_at_5_percent` указано, сколько скрытых нейронов дали не менее 5% от максимального изменения выхода при отключении одного нейрона.
+Скрипт автоматически сохраняет сокращённую сеть: скрытые нейроны с влиянием ниже 5% от максимального убираются, а в JSON записывается сравнение выходных сигналов полной и сокращённой версий. MP4 — это покадровая анимация: на каждом кадре показан один момент записи, затем для того же момента переключается `FULL`/`PRUNED`.
+Прозрачность связей и узлов зависит от силы сигнала: слабые вклады почти невидимы, сильные остаются яркими.
 
 ## DAgger с искусственным экспертом
 
