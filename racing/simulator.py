@@ -166,7 +166,7 @@ class RacingGame:
         pygame.draw.polygon(self.screen, (76, 172, 247) if not self.car.crashed else (130, 40, 40), polygon)
         pygame.draw.circle(self.screen, (250, 250, 250), self.car.position + self.car.heading() * 10, 3)
         status = f"Episode {self.episode} | checkpoints {self.progress} | speed {self.car.speed:5.1f} | recording: {'ON' if self.recording else 'OFF'}"
-        hint = "WASD / arrows — drive   R — restart   Space — toggle recording   Esc — quit"
+        hint = "WASD / arrows — drive   R/К — restart   Space — toggle recording   Esc — quit"
         self.screen.blit(self.font.render(status, True, (250, 250, 250)), (24, 20))
         self.screen.blit(self.font.render(hint, True, (250, 250, 250)), (24, 50))
         if self.message:
@@ -184,7 +184,7 @@ class RacingGame:
                     elif event.type == pygame.KEYDOWN:
                         if event.key == pygame.K_ESCAPE:
                             running = False
-                        elif event.key == pygame.K_r:
+                        elif event.key == pygame.K_r or event.unicode.lower() == "к":
                             self.reset("Restarted")
                         elif event.key == pygame.K_SPACE:
                             self.recording = not self.recording
