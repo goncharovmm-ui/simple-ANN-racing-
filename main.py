@@ -23,35 +23,40 @@ def main() -> None:
     parser.add_argument("--agents", type=int, default=20, help="parallel DAgger cars (default: 20)")
     parser.add_argument("--speed", type=int, default=8, help="simulation steps per rendered frame for DAgger (default: 8)")
     args = parser.parse_args()
-    policy_path = args.dagger or args.ai or args.model or Path("models/policy.npz")
-    if not args.editor and not args.mode and not args.ai and not args.dagger and not args.model:
-        models = sorted(Path("models").rglob("*.npz"))
-        desktop = Path.home() / "Desktop"
-        if desktop.exists():
-            models.extend(sorted(desktop.glob("*.npz")))
-        selection = MainMenu(models).run()
-        if selection is None:
-            return
-        args.mode, args.driver, selected_model = selection
-        if selected_model:
-            policy_path = selected_model
-    if args.mode == "training":
-        TrainingCenter(args.map, policy_path if policy_path.exists() else None).run()
-        return
-    track = Track.load(args.map)
-    if args.editor or args.mode == "sandbox":
-        if args.ai or args.dagger or args.driver == "ai":
-            parser.error("sandbox cannot use an AI driver")
-        MapEditor(track, args.map).run()
-    else:
-        use_ai = bool(args.ai or args.dagger) or args.driver == "ai"
-        if use_ai and not policy_path.exists():
-            parser.error(f"No neural policy at {policy_path}. Record demonstrations and run: python train.py")
-        policy = NeuralPolicy.load(policy_path) if use_ai else None
-        if args.dagger and args.agents > 1:
-            ParallelDaggerBatch(track, policy, args.map, agents=args.agents, speed=args.speed).run()
+    interactive = not args.editor and not args.mode and not args.ai and not args.dagger and not args.model
+    while True:
+        policy_path = args.dagger or args.ai or args.model or Path("models/policy.npz")
+        selected_mode, selected_driver = args.mode, args.driver
+        if interactive:
+            models = sorted(Path("models").rglob("*.npz"))
+            desktop = Path.home() / "Desktop"
+            if desktop.exists():
+                models.extend(sorted(desktop.glob("*.npz")))
+            selection = MainMenu(models).run()
+            if selection is None:
+                return
+            selected_mode, selected_driver, selected_model = selection
+            if selected_model:
+                policy_path = selected_model
+        if selected_mode == "training":
+            TrainingCenter(args.map, policy_path if policy_path.exists() else None).run()
         else:
-            RacingGame(track, record=not use_ai or bool(args.dagger), policy=policy, map_path=args.map, game_mode="dagger" if args.dagger else "race", expert=ArtificialExpert() if args.dagger else None, max_episodes=args.episodes if args.dagger else None).run()
+            track = Track.load(args.map)
+            if args.editor or selected_mode == "sandbox":
+                if args.ai or args.dagger or selected_driver == "ai":
+                    parser.error("sandbox cannot use an AI driver")
+                MapEditor(track, args.map).run()
+            else:
+                use_ai = bool(args.ai or args.dagger) or selected_driver == "ai"
+                if use_ai and not policy_path.exists():
+                    parser.error(f"No neural policy at {policy_path}. Record demonstrations and run: python train.py")
+                policy = NeuralPolicy.load(policy_path) if use_ai else None
+                if args.dagger and args.agents > 1:
+                    ParallelDaggerBatch(track, policy, args.map, agents=args.agents, speed=args.speed).run()
+                else:
+                    RacingGame(track, record=not use_ai or bool(args.dagger), policy=policy, map_path=args.map, game_mode="dagger" if args.dagger else "race", expert=ArtificialExpert() if args.dagger else None, max_episodes=args.episodes if args.dagger else None).run()
+        if not interactive:
+            return
 
 
 if __name__ == "__main__":
