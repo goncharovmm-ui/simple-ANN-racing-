@@ -164,6 +164,7 @@ class RacingGame:
         self.writer: DemoWriter | None = None
         self.collisions = 0
         self.game_over = False
+        self.idle_seconds = 0.0
         self.dagger_label: tuple[float, float, bool] | None = None
         self.max_episodes, self.finished_episodes, self.successful_episodes = max_episodes, 0, 0
         self.trajectory: list[pygame.Vector2] = []
@@ -220,6 +221,7 @@ class RacingGame:
         self.elapsed = self.lap_elapsed = 0.0
         self.collisions = 0
         self.game_over = False
+        self.idle_seconds = 0.0
         self.trajectory = []
         self.last_lap: float | None = None
         self.message = reason
@@ -242,6 +244,13 @@ class RacingGame:
         self.trajectory.append(self.car.position.copy())
         self.elapsed += dt
         self.lap_elapsed += dt
+        if self.car.speed < 12.0:
+            self.idle_seconds += dt
+        else:
+            self.idle_seconds = 0.0
+        if self.idle_seconds >= 5.0:
+            self.game_over = True
+            self.message = "Game over: inactive for 5 seconds — press R/К for a new attempt"
         if not all(self.is_road(point) for point in self.car_points()):
             self.car.hit_wall()
             self.collisions += 1
@@ -280,7 +289,7 @@ class RacingGame:
         pygame.draw.circle(self.screen, (250, 250, 250), self.car.position + self.car.heading() * 10, 3)
         best = "--" if self.best_lap is None else f"{self.best_lap:.2f}s"
         lines = [f"Lap {self.completed_laps + 1}: {self.lap_elapsed:.2f}s | best: {best} | score: {self.fitness:.0f}",
-                 f"checkpoints {self.progress} | speed {self.car.speed:5.1f} | hits {self.collisions} | mode: {'AI' if self.policy else 'manual'}",
+                 f"checkpoints {self.progress} | speed {self.car.speed:5.1f} | hits {self.collisions} | idle {self.idle_seconds:.1f}s | mode: {'AI' if self.policy else 'manual'}",
                  "WASD/arrows — drive   Shift — drift   R/К — restart   Esc — quit", self.message]
         if self.expert and self.max_episodes:
             lines.insert(2, f"DAgger batch: {self.finished_episodes}/{self.max_episodes} | finished: {self.successful_episodes} | green = better trajectory")
