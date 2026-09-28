@@ -35,6 +35,7 @@ class TrainingCenter:
         self.model_index = next((i for i, path in enumerate(self.models) if model_path and path.resolve() == model_path.resolve()), 0)
         self.process: subprocess.Popen[str] | None = None
         self.video_process: subprocess.Popen[str] | None = None
+        self.output_buffer = b""
         self.history_path: Path | None = None
         self.video_path: Path | None = None
         self.run_name = ""
@@ -138,8 +139,11 @@ class TrainingCenter:
             self.status = "Полный человеческий круг не найден — запуск с экспертного старта"
         if self.selected_model and self.selected_model.exists():
             command.extend(["--base-model", str(self.selected_model)])
-        self.process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        # Read raw bytes below.  TextIOWrapper + O_NONBLOCK can receive None
+        # from macOS pipes and crash while decoding partial UTF-8 output.
+        self.process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=False, bufsize=0)
         os.set_blocking(self.process.stdout.fileno(), False)
+        self.output_buffer = b""
         self.started_at, self.epoch, self.lines = time.monotonic(), 0, []
         self.status = "Обучение запущено"
 
@@ -184,10 +188,23 @@ class TrainingCenter:
 
     def poll_processes(self) -> None:
         if self.process and self.process.stdout:
-            try:
-                text = self.process.stdout.read()
-            except (BlockingIOError, OSError):
-                text = ""
+            chunks: list[bytes] = []
+            while True:
+                try:
+                    chunk = os.read(self.process.stdout.fileno(), 65536)
+                except (BlockingIOError, OSError):
+                    break
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            if chunks:
+                self.output_buffer += b"".join(chunks)
+            complete = self.output_buffer.split(b"\n")
+            self.output_buffer = complete.pop() if complete else b""
+            text = b"\n".join(complete).decode("utf-8", errors="replace")
+            if self.process.poll() is not None and self.output_buffer:
+                text = f"{text}\n{self.output_buffer.decode('utf-8', errors='replace')}"
+                self.output_buffer = b""
             if text:
                 self.lines.extend(text.splitlines())
                 self.lines = self.lines[-5:]
