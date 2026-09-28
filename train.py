@@ -12,7 +12,7 @@ from racing.neural import make_features
 
 def load_demos(directory: Path) -> tuple[np.ndarray, np.ndarray]:
     rows_x, rows_y = [], []
-    files = sorted(directory.glob("*.csv"))
+    files = sorted(directory.rglob("*.csv"))
     if not files:
         raise ValueError(f"No CSV demonstrations in {directory}. Run: python main.py --record")
     for path in files:

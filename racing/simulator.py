@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 import pygame
@@ -46,6 +48,13 @@ class Track:
                "obstacles": [list(rect) for rect in self.obstacles]}
         path.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
+    def fingerprint(self) -> str:
+        """Stable content ID, so an edited map never shares a dataset bucket with its old version."""
+        raw = {"road": list(self.road), "inner_grass": list(self.inner_grass),
+               "start": [self.start.x, self.start.y, self.start_angle],
+               "checkpoints": [[p.x, p.y] for p in self.checkpoints], "obstacles": [list(rect) for rect in self.obstacles]}
+        return hashlib.sha256(json.dumps(raw, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+
 
 @dataclass
 class Car:
@@ -79,18 +88,19 @@ class Car:
 
 
 class DemoWriter:
-    fields = ["episode", "step", "x", "y", "angle", "speed", "next_checkpoint", "progress", "elapsed_s", "lap_s", "fitness", "steering", "throttle", "handbrake", *[f"lidar_{i}" for i in range(len(LIDAR_ANGLES))]]
+    fields = ["run_id", "mode", "driver", "track_id", "map_path", "episode", "step", "x", "y", "angle", "speed", "next_checkpoint", "progress", "elapsed_s", "lap_s", "fitness", "steering", "throttle", "handbrake", *[f"lidar_{i}" for i in range(len(LIDAR_ANGLES))]]
 
-    def __init__(self, directory: Path) -> None:
+    def __init__(self, directory: Path, metadata: dict[str, str]) -> None:
         directory.mkdir(parents=True, exist_ok=True)
-        self.path = directory / f"demo_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.csv"
+        self.metadata = metadata
+        self.path = directory / f"{metadata['driver']}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{metadata['run_id'][:8]}.csv"
         self.file = self.path.open("w", newline="", encoding="utf-8")
         self.writer = csv.DictWriter(self.file, fieldnames=self.fields)
         self.writer.writeheader()
 
     def write(self, game: "RacingGame", steering: float, throttle: float, handbrake: bool, lidar: np.ndarray) -> None:
         car = game.car
-        row = {"episode": game.episode, "step": game.step, "x": round(car.position.x, 3), "y": round(car.position.y, 3),
+        row = {**self.metadata, "episode": game.episode, "step": game.step, "x": round(car.position.x, 3), "y": round(car.position.y, 3),
                "angle": round(car.angle, 3), "speed": round(car.speed, 3), "next_checkpoint": game.next_checkpoint,
                "progress": game.progress, "elapsed_s": round(game.elapsed, 3), "lap_s": round(game.lap_elapsed, 3),
                "fitness": round(game.fitness, 3), "steering": round(steering, 3), "throttle": round(throttle, 3), "handbrake": int(handbrake)}
@@ -114,16 +124,30 @@ def draw_track(screen: pygame.Surface, track: Track, next_checkpoint: int | None
 
 
 class RacingGame:
-    def __init__(self, track: Track, record: bool = False, screen: pygame.Surface | None = None, policy: NeuralPolicy | None = None) -> None:
+    def __init__(self, track: Track, record: bool = False, screen: pygame.Surface | None = None, policy: NeuralPolicy | None = None, game_mode: str = "race", map_path: Path = Path("maps/default.json")) -> None:
         pygame.init()
         self.screen = screen if screen is not None else pygame.display.set_mode((WIDTH, HEIGHT))
         self.clock, self.font = pygame.time.Clock(), pygame.font.Font(None, 28)
         pygame.display.set_caption("Simple ANN Racing — manual data collection")
         self.track, self.recording, self.policy = track, record, policy
-        self.writer = DemoWriter(Path("data/demos")) if record else None
+        self.game_mode, self.map_path = game_mode, map_path
+        self.track_id = f"{map_path.stem}-{track.fingerprint()}"
+        self.run_id = uuid4().hex
+        self.writer: DemoWriter | None = None
+        if record:
+            self.start_recording()
         self.best_lap: float | None = None
         self.reset("Ready")
         self.episode = 1
+
+    def start_recording(self) -> None:
+        if self.policy:
+            self.recording = False
+            self.message = "AI actions are not recorded as demonstrations"
+            return
+        metadata = {"run_id": self.run_id, "mode": self.game_mode, "driver": "player", "track_id": self.track_id, "map_path": str(self.map_path)}
+        self.writer = DemoWriter(Path("data/demos") / self.game_mode / self.track_id, metadata)
+        self.recording = True
 
     @property
     def fitness(self) -> float:
@@ -205,7 +229,11 @@ class RacingGame:
                         elif event.key == pygame.K_r or event.unicode.lower() == "к":
                             self.reset("Restarted"); self.episode += 1
                         elif event.key == pygame.K_SPACE and not self.policy:
-                            self.recording = not self.recording; self.message = f"Recording {'enabled' if self.recording else 'paused'}"
+                            if self.writer is None:
+                                self.start_recording()
+                            else:
+                                self.recording = not self.recording
+                            self.message = f"Recording {'enabled' if self.recording else 'paused'}"
                 steering, throttle, handbrake, lidar = self.update(dt)
                 if self.recording and not self.car.crashed and self.writer:
                     self.writer.write(self, steering, throttle, handbrake, lidar)
@@ -249,7 +277,7 @@ class MapEditor:
                     elif event.type == pygame.KEYDOWN and event.key == pygame.K_TAB:
                         self.testing = not self.testing
                         if self.testing:
-                            self.preview_game = RacingGame(self.track, record=False, screen=self.screen)
+                            self.preview_game = RacingGame(self.track, record=False, screen=self.screen, game_mode="sandbox_test", map_path=self.save_path)
                             self.message = "Test mode: drive with WASD/arrows, Shift to drift, Tab to edit"
                         else:
                             self.preview_game = None
