@@ -12,7 +12,7 @@ from racing.simulator import HEIGHT, WIDTH, RacingGame, Track, draw_track
 class ParallelDaggerBatch:
     """Runs many independent DAgger rollouts at accelerated simulation speed."""
 
-    def __init__(self, track: Track, policy: NeuralPolicy, map_path: Path, agents: int = 20, speed: int = 8, display: bool = True, game_mode: str = "dagger", label_all: bool = False) -> None:
+    def __init__(self, track: Track, policy: NeuralPolicy, map_path: Path, agents: int = 20, speed: int = 8, display: bool = True, game_mode: str = "dagger", label_all: bool = False, expert_controls: bool = False, max_steps: int = 3600) -> None:
         pygame.init()
         self.display = display
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT)) if display else pygame.Surface((WIDTH, HEIGHT))
@@ -20,8 +20,9 @@ class ParallelDaggerBatch:
             pygame.display.set_caption("Simple ANN Racing — parallel DAgger")
         self.clock, self.font = pygame.time.Clock(), pygame.font.Font(None, 27)
         self.track, self.speed = track, max(1, speed)
+        self.max_steps = max_steps
         self.games = [RacingGame(track, record=True, screen=pygame.Surface((WIDTH, HEIGHT)), policy=policy,
-                                 game_mode=game_mode, map_path=map_path, expert=ArtificialExpert(label_all=label_all)) for _ in range(agents)]
+                                 game_mode=game_mode, map_path=map_path, expert=ArtificialExpert(label_all=label_all), expert_controls=expert_controls) for _ in range(agents)]
         self.done = [False] * agents
 
     def step_game(self, game: RacingGame) -> bool:
@@ -29,6 +30,9 @@ class ParallelDaggerBatch:
         if game.writer and game.dagger_label:
             game.writer.write(game, *game.dagger_label, lidar)
         game.step += 1
+        if game.step >= self.max_steps:
+            game.game_over = True
+            game.message = "Episode time limit reached"
         if game.game_over or game.completed_laps > 0:
             game.finish_dagger_episode()
             if game.writer:

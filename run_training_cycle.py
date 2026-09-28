@@ -29,6 +29,7 @@ def main() -> None:
     parser.add_argument("--agents", type=int, default=20)
     parser.add_argument("--map", type=Path, default=Path("maps/default.json"))
     parser.add_argument("--train-epochs", type=int, default=100)
+    parser.add_argument("--run-name", default="cycle", help="name used to isolate this experiment's DAgger data")
     parser.add_argument("--output", type=Path, default=Path("artifacts/training-history.json"))
     args = parser.parse_args()
     track = Track.load(args.map)
@@ -38,8 +39,8 @@ def main() -> None:
                "finish": list(track.finish), "obstacles": [list(rect) for rect in track.obstacles],
                "checkpoints": [list(point) for point in track.checkpoints]}, "epochs": []}
     for epoch in range(1, args.epochs + 1):
-        mode = f"dagger-epoch-{epoch:02d}"
-        batch = ParallelDaggerBatch(track, NeuralPolicy.load(policy_path), args.map, agents=args.agents, speed=100, display=False, game_mode=mode, label_all=True)
+        mode = f"dagger-{args.run_name}-epoch-{epoch:02d}"
+        batch = ParallelDaggerBatch(track, NeuralPolicy.load(policy_path), args.map, agents=args.agents, speed=100, display=False, game_mode=mode, label_all=True, expert_controls=epoch <= 2)
         batch.run()
         trajectories = [trajectory_record(game) for game in batch.games]
         finished = sum(item["success"] for item in trajectories)
@@ -48,7 +49,7 @@ def main() -> None:
         args.output.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
         sources = []
         for previous in range(1, epoch + 1):
-            sources.extend(["--data", str(Path("data/demos") / f"dagger-epoch-{previous:02d}")])
+            sources.extend(["--data", str(Path("data/demos") / f"dagger-{args.run_name}-epoch-{previous:02d}")])
         next_policy = Path("models/cycle") / f"policy_{epoch:03d}.npz"
         command = [sys.executable, "train.py", *sources, "--output", str(next_policy), "--epochs", str(args.train_epochs)]
         print(f"Epoch {epoch}/{args.epochs}: {finished}/{args.agents} finished; training {next_policy}")

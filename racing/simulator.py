@@ -168,12 +168,12 @@ def draw_track(screen: pygame.Surface, track: Track, next_checkpoint: int | None
 
 
 class RacingGame:
-    def __init__(self, track: Track, record: bool = False, screen: pygame.Surface | None = None, policy: NeuralPolicy | None = None, game_mode: str = "race", map_path: Path = Path("maps/default.json"), expert: ArtificialExpert | None = None, max_episodes: int | None = None) -> None:
+    def __init__(self, track: Track, record: bool = False, screen: pygame.Surface | None = None, policy: NeuralPolicy | None = None, game_mode: str = "race", map_path: Path = Path("maps/default.json"), expert: ArtificialExpert | None = None, max_episodes: int | None = None, expert_controls: bool = False) -> None:
         pygame.init()
         self.screen = screen if screen is not None else pygame.display.set_mode((WIDTH, HEIGHT))
         self.clock, self.font = pygame.time.Clock(), pygame.font.Font(None, 28)
         pygame.display.set_caption("Simple ANN Racing — manual data collection")
-        self.track, self.recording, self.policy, self.expert = track, record, policy, expert
+        self.track, self.recording, self.policy, self.expert, self.expert_controls = track, record, policy, expert, expert_controls
         self.game_mode, self.map_path = game_mode, map_path
         self.track_id = f"{map_path.stem}-{track.fingerprint()}"
         self.run_id = uuid4().hex
@@ -264,6 +264,8 @@ class RacingGame:
             steering, throttle, handbrake = self.policy.act(state_lidar, self.car.speed)
             if self.expert and self.expert.should_label(state_lidar, (steering, throttle, handbrake)):
                 self.dagger_label = self.expert.act(self, state_lidar)
+                if self.expert_controls:
+                    steering, throttle, handbrake = self.dagger_label
         else:
             steering = float(keys[pygame.K_RIGHT] or keys[pygame.K_d]) - float(keys[pygame.K_LEFT] or keys[pygame.K_a])
             throttle = float(keys[pygame.K_UP] or keys[pygame.K_w]) - float(keys[pygame.K_DOWN] or keys[pygame.K_s])

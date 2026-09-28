@@ -81,13 +81,13 @@ python train.py --epochs 100
 Для двадцати эпох по двадцать параллельных машин, без окон во время расчёта:
 
 ```bash
-python run_training_cycle.py --epochs 20 --agents 20
+python run_training_cycle.py --epochs 20 --agents 20 --run-name route-expert --output artifacts/training-history-route-expert.json
 ```
 
 Скрипт сохраняет отдельные DAgger-данные каждой эпохи, обучает новую модель после каждой из них и записывает `artifacts/training-history.json`. Затем создайте пятиминутный ролик:
 
 ```bash
-python make_training_movie.py --duration 300
+python make_training_movie.py --history artifacts/training-history-route-expert.json --output artifacts/training-progress-route-expert.mp4 --duration 300
 ```
 
 ## Структура логов
