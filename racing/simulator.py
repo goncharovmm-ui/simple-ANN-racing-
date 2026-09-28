@@ -130,6 +130,7 @@ class DemoWriter:
                "fitness": round(game.fitness, 3), "steering": round(steering, 3), "throttle": round(throttle, 3), "handbrake": int(handbrake)}
         row.update({f"lidar_{i}": round(float(v), 4) for i, v in enumerate(lidar)})
         self.writer.writerow(row)
+        self.file.flush()
 
     def close(self) -> None:
         self.file.close()
