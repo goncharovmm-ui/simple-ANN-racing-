@@ -152,7 +152,7 @@ def draw_track(screen: pygame.Surface, track: Track, next_checkpoint: int | None
 
 
 class RacingGame:
-    def __init__(self, track: Track, record: bool = False, screen: pygame.Surface | None = None, policy: NeuralPolicy | None = None, game_mode: str = "race", map_path: Path = Path("maps/default.json"), expert: ArtificialExpert | None = None) -> None:
+    def __init__(self, track: Track, record: bool = False, screen: pygame.Surface | None = None, policy: NeuralPolicy | None = None, game_mode: str = "race", map_path: Path = Path("maps/default.json"), expert: ArtificialExpert | None = None, max_episodes: int | None = None) -> None:
         pygame.init()
         self.screen = screen if screen is not None else pygame.display.set_mode((WIDTH, HEIGHT))
         self.clock, self.font = pygame.time.Clock(), pygame.font.Font(None, 28)
@@ -165,6 +165,9 @@ class RacingGame:
         self.collisions = 0
         self.game_over = False
         self.dagger_label: tuple[float, float, bool] | None = None
+        self.max_episodes, self.finished_episodes, self.successful_episodes = max_episodes, 0, 0
+        self.trajectory: list[pygame.Vector2] = []
+        self.trajectory_history: list[tuple[list[pygame.Vector2], tuple[int, int, int]]] = []
         if record:
             self.start_recording()
         self.best_lap: float | None = None
@@ -217,6 +220,7 @@ class RacingGame:
         self.elapsed = self.lap_elapsed = 0.0
         self.collisions = 0
         self.game_over = False
+        self.trajectory = []
         self.last_lap: float | None = None
         self.message = reason
 
@@ -235,6 +239,7 @@ class RacingGame:
             throttle = float(keys[pygame.K_UP] or keys[pygame.K_w]) - float(keys[pygame.K_DOWN] or keys[pygame.K_s])
             handbrake = bool(keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT])
         self.car.update(steering, throttle, handbrake, dt)
+        self.trajectory.append(self.car.position.copy())
         self.elapsed += dt
         self.lap_elapsed += dt
         if not all(self.is_road(point) for point in self.car_points()):
@@ -262,6 +267,11 @@ class RacingGame:
 
     def draw(self, lidar: np.ndarray) -> None:
         draw_track(self.screen, self.track, self.next_checkpoint)
+        for points, color in self.trajectory_history:
+            if len(points) > 1:
+                pygame.draw.lines(self.screen, color, False, points, 3)
+        if len(self.trajectory) > 1:
+            pygame.draw.lines(self.screen, (240, 188, 65), False, self.trajectory, 2)
         for angle, distance in zip(LIDAR_ANGLES, lidar):
             radians = math.radians(self.car.angle + float(angle))
             endpoint = self.car.position + pygame.Vector2(math.cos(radians), math.sin(radians)) * distance * MAX_LIDAR_DISTANCE
@@ -272,9 +282,26 @@ class RacingGame:
         lines = [f"Lap {self.completed_laps + 1}: {self.lap_elapsed:.2f}s | best: {best} | score: {self.fitness:.0f}",
                  f"checkpoints {self.progress} | speed {self.car.speed:5.1f} | hits {self.collisions} | mode: {'AI' if self.policy else 'manual'}",
                  "WASD/arrows — drive   Shift — drift   R/К — restart   Esc — quit", self.message]
+        if self.expert and self.max_episodes:
+            lines.insert(2, f"DAgger batch: {self.finished_episodes}/{self.max_episodes} | finished: {self.successful_episodes} | green = better trajectory")
         for i, line in enumerate(lines):
             self.screen.blit(self.font.render(line, True, (250, 250, 250) if i < 3 else (255, 226, 102)), (24, 20 + i * 30))
         pygame.display.flip()
+
+    def finish_dagger_episode(self) -> None:
+        success = self.completed_laps > 0
+        if success:
+            self.successful_episodes += 1
+        if success:
+            time_quality = max(0.0, min(1.0, 1.0 - (self.last_lap or 30.0) / 30.0))
+            damage_quality = 1.0 - min(1.0, self.collisions / 5.0)
+            quality = 0.55 + 0.45 * (0.7 * time_quality + 0.3 * damage_quality)
+        else:
+            quality = max(0.0, 0.35 - self.collisions * 0.05)
+        color = (round(225 * (1 - quality) + 35 * quality), round(60 * (1 - quality) + 200 * quality), 65)
+        self.trajectory_history.append((self.trajectory.copy(), color))
+        self.trajectory_history = self.trajectory_history[-20:]
+        self.finished_episodes += 1
 
     def run(self) -> None:
         running = True
@@ -294,6 +321,15 @@ class RacingGame:
                     elif not self.expert:
                         self.writer.write(self, steering, throttle, handbrake, lidar)
                 self.step += 1
+                if self.expert and self.max_episodes and (self.game_over or self.completed_laps > 0):
+                    self.finish_dagger_episode()
+                    if self.finished_episodes >= self.max_episodes:
+                        self.message = f"DAgger batch complete: {self.successful_episodes}/{self.max_episodes} finished"
+                        self.draw(lidar)
+                        running = False
+                        continue
+                    self.reset(f"DAgger attempt {self.finished_episodes + 1}/{self.max_episodes}")
+                    self.episode += 1
                 self.draw(lidar)
         finally:
             if self.writer:
