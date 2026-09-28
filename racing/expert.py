@@ -13,7 +13,7 @@ class ArtificialExpert:
     """Rule-based safety teacher used to label the learner's risky rollouts for DAgger."""
 
     def act(self, game: "RacingGame", lidar: np.ndarray) -> tuple[float, float, bool]:
-        target = game.track.checkpoints[game.next_checkpoint]
+        target = game.track.finish if game.awaiting_finish else game.track.checkpoints[game.next_checkpoint]
         vector = target - game.car.position
         desired = math.degrees(math.atan2(vector.y, vector.x))
         delta = (desired - game.car.angle + 180) % 360 - 180

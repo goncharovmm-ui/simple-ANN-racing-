@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import math
+import random
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,7 @@ class Track:
     inner_grass: pygame.Rect = field(default_factory=lambda: pygame.Rect(330, 255, 620, 290))
     start: pygame.Vector2 = field(default_factory=lambda: pygame.Vector2(245, 170))
     start_angle: float = 0.0
+    finish: pygame.Vector2 = field(default_factory=lambda: pygame.Vector2(170, 215))
     checkpoints: list[pygame.Vector2] = field(default_factory=lambda: [
         pygame.Vector2(570, 170), pygame.Vector2(1030, 170), pygame.Vector2(1090, 370),
         pygame.Vector2(1090, 625), pygame.Vector2(650, 630), pygame.Vector2(190, 630), pygame.Vector2(170, 390)])
@@ -38,13 +40,13 @@ class Track:
             return cls()
         raw = json.loads(path.read_text(encoding="utf-8"))
         return cls(pygame.Rect(raw["road"]), pygame.Rect(raw["inner_grass"]), pygame.Vector2(raw["start"][:2]),
-                   float(raw["start"][2]), [pygame.Vector2(p) for p in raw["checkpoints"]],
+                   float(raw["start"][2]), pygame.Vector2(raw.get("finish", [170, 215])), [pygame.Vector2(p) for p in raw["checkpoints"]],
                    [pygame.Rect(r) for r in raw["obstacles"]])
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         raw = {"road": list(self.road), "inner_grass": list(self.inner_grass),
-               "start": [round(self.start.x), round(self.start.y), self.start_angle],
+               "start": [round(self.start.x), round(self.start.y), self.start_angle], "finish": [round(self.finish.x), round(self.finish.y)],
                "checkpoints": [[round(p.x), round(p.y)] for p in self.checkpoints],
                "obstacles": [list(rect) for rect in self.obstacles]}
         path.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -52,9 +54,19 @@ class Track:
     def fingerprint(self) -> str:
         """Stable content ID, so an edited map never shares a dataset bucket with its old version."""
         raw = {"road": list(self.road), "inner_grass": list(self.inner_grass),
-               "start": [self.start.x, self.start.y, self.start_angle],
+               "start": [self.start.x, self.start.y, self.start_angle], "finish": [self.finish.x, self.finish.y],
                "checkpoints": [[p.x, p.y] for p in self.checkpoints], "obstacles": [list(rect) for rect in self.obstacles]}
         return hashlib.sha256(json.dumps(raw, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+
+    def random_start(self) -> tuple[pygame.Vector2, float]:
+        for _ in range(80):
+            candidate = self.start + pygame.Vector2(random.uniform(-48, 48), random.uniform(-35, 35))
+            valid = self.road.collidepoint(candidate) and not self.inner_grass.collidepoint(candidate) and not any(rect.collidepoint(candidate) for rect in self.obstacles)
+            if valid:
+                target = self.checkpoints[0] if self.checkpoints else self.finish
+                angle = math.degrees(math.atan2(target.y - candidate.y, target.x - candidate.x)) + random.uniform(-12, 12)
+                return candidate, angle
+        return self.start.copy(), self.start_angle
 
 
 @dataclass
@@ -139,7 +151,7 @@ class DemoWriter:
             self.path.unlink(missing_ok=True)
 
 
-def draw_track(screen: pygame.Surface, track: Track, next_checkpoint: int | None = None) -> None:
+def draw_track(screen: pygame.Surface, track: Track, next_checkpoint: int | None = None, finish_active: bool = False) -> None:
     screen.fill((36, 112, 57))
     pygame.draw.rect(screen, (61, 65, 72), track.road, border_radius=28)
     pygame.draw.rect(screen, (36, 112, 57), track.inner_grass, border_radius=20)
@@ -149,6 +161,9 @@ def draw_track(screen: pygame.Surface, track: Track, next_checkpoint: int | None
         pygame.draw.rect(screen, (193, 58, 55), obstacle, border_radius=5)
     for i, checkpoint in enumerate(track.checkpoints):
         pygame.draw.circle(screen, (246, 208, 74) if i == next_checkpoint else (170, 174, 178), checkpoint, 9)
+    finish_color = (81, 231, 126) if finish_active else (118, 168, 132)
+    pygame.draw.circle(screen, finish_color, track.finish, 15, width=4)
+    pygame.draw.line(screen, finish_color, track.finish + pygame.Vector2(-11, 0), track.finish + pygame.Vector2(11, 0), 3)
 
 
 class RacingGame:
@@ -216,8 +231,10 @@ class RacingGame:
             self.writer = None
             self.run_id = uuid4().hex
             self.start_recording()
-        self.car = Car(self.track.start.copy(), self.track.start_angle)
+        position, angle = self.track.random_start()
+        self.car = Car(position, angle)
         self.next_checkpoint = self.progress = self.completed_laps = self.step = 0
+        self.awaiting_finish = False
         self.elapsed = self.lap_elapsed = 0.0
         self.collisions = 0
         self.game_over = False
@@ -259,23 +276,26 @@ class RacingGame:
                 self.message = "Game over: 5 wall hits — press R/К for a new attempt"
             else:
                 self.message = f"Wall hit: speed reduced ({self.collisions}/5)"
-        if self.track.checkpoints and self.car.position.distance_to(self.track.checkpoints[self.next_checkpoint]) < 58:
+        if self.track.checkpoints and not self.awaiting_finish and self.car.position.distance_to(self.track.checkpoints[self.next_checkpoint]) < 58:
             self.progress += 1
-            self.next_checkpoint = (self.next_checkpoint + 1) % len(self.track.checkpoints)
-            if self.next_checkpoint == 0:
-                self.completed_laps += 1
-                self.last_lap = self.lap_elapsed
-                self.best_lap = self.last_lap if self.best_lap is None else min(self.best_lap, self.last_lap)
-                self.lap_elapsed = 0.0
-                if self.writer and not self.writer.committed:
-                    self.writer.commit()
-                    self.message = f"Lap {self.completed_laps}: {self.last_lap:.2f}s — run saved"
-                else:
-                    self.message = f"Lap {self.completed_laps}: {self.last_lap:.2f}s"
+            self.next_checkpoint += 1
+            if self.next_checkpoint == len(self.track.checkpoints):
+                self.awaiting_finish = True
+                self.message = "All checkpoints passed — head to the finish"
+        if self.awaiting_finish and self.car.position.distance_to(self.track.finish) < 58:
+            self.completed_laps += 1
+            self.last_lap = self.lap_elapsed
+            self.best_lap = self.last_lap if self.best_lap is None else min(self.best_lap, self.last_lap)
+            self.lap_elapsed, self.next_checkpoint, self.awaiting_finish = 0.0, 0, False
+            if self.writer and not self.writer.committed:
+                self.writer.commit()
+                self.message = f"Lap {self.completed_laps}: {self.last_lap:.2f}s — run saved"
+            else:
+                self.message = f"Lap {self.completed_laps}: {self.last_lap:.2f}s"
         return steering, throttle, handbrake, self.raycast()
 
     def draw(self, lidar: np.ndarray) -> None:
-        draw_track(self.screen, self.track, self.next_checkpoint)
+        draw_track(self.screen, self.track, None if self.awaiting_finish else self.next_checkpoint, self.awaiting_finish)
         for points, color in self.trajectory_history:
             if len(points) > 1:
                 pygame.draw.lines(self.screen, color, False, points, 3)
@@ -438,8 +458,8 @@ class MapEditor:
         self.dragging: tuple[str, int | None] | None = None
         self.message = "Select a tool, then click the map. Drag objects in Move mode."
         names = [("move", "Move"), ("obstacle", "Add obstacle"), ("checkpoint", "Add checkpoint"),
-                 ("start", "Set start"), ("delete", "Delete"), ("save", "Save map"), ("test", "Test track")]
-        self.buttons = [(action, label, pygame.Rect(10 + index * 180, 14, 170, 42)) for index, (action, label) in enumerate(names)]
+                 ("start", "Set start"), ("finish", "Set finish"), ("delete", "Delete"), ("save", "Save map"), ("test", "Test track")]
+        self.buttons = [(action, label, pygame.Rect(10 + index * 158, 14, 150, 42)) for index, (action, label) in enumerate(names)]
 
     def draw_toolbar(self) -> None:
         for action, label, rect in self.buttons:
@@ -474,6 +494,8 @@ class MapEditor:
                 return "checkpoint", index
         if self.track.start.distance_to(position) <= 16:
             return "start", None
+        if self.track.finish.distance_to(position) <= 18:
+            return "finish", None
         return None
 
     def handle_tool(self, position: tuple[int, int]) -> None:
@@ -500,6 +522,9 @@ class MapEditor:
         elif self.tool == "start":
             self.track.start = point
             self.message = "Start moved"
+        elif self.tool == "finish":
+            self.track.finish = point
+            self.message = "Finish moved"
         elif self.tool == "delete":
             found = self.object_at(position)
             if found is None:
@@ -511,7 +536,7 @@ class MapEditor:
                 self.track.checkpoints.pop(found[1])
                 self.message = "Checkpoint deleted"
             else:
-                self.message = "The start point cannot be deleted; use Set start instead"
+                self.message = "Start and finish cannot be deleted; use their buttons to move them"
         elif self.tool == "move":
             self.dragging = self.object_at(position)
             self.message = "Dragging object" if self.dragging else "Choose an object to move"
@@ -525,8 +550,10 @@ class MapEditor:
             self.track.obstacles[index].center = (round(point.x), round(point.y))
         elif kind == "checkpoint":
             self.track.checkpoints[index] = point
-        else:
+        elif kind == "start":
             self.track.start = point
+        else:
+            self.track.finish = point
 
     def run(self) -> None:
         running = True
