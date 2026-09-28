@@ -79,6 +79,14 @@ python run_training_cycle.py --epochs 10 --agents 20 --eval-agents 20 --seed-dat
 python main.py --mode replay --model models/cycle/my-track-v1/policy_005.npz --map maps/my-track.json --replay-data data/demos/race/my-track-<hash>/player.csv
 ```
 
+Для анализа внутренней работы сети можно построить десятикадровый монтаж и отчёт абляции:
+
+```bash
+python analyze_neural_model.py --model /path/to/model.npz --map maps/default.json --output artifacts/neural-analysis.png --report artifacts/neural-analysis.json
+```
+
+Монтаж показывает карту, машину, 16 входов, 64 скрытых нейрона, 3 выхода и цветом подсвеченные вклады связей. В JSON `effective_at_5_percent` указано, сколько скрытых нейронов дали не менее 5% от максимального изменения выхода при отключении одного нейрона.
+
 ## DAgger с искусственным экспертом
 
 Лучший чистый человеческий заезд нужно использовать для начальной модели, а не смешивать с неудачными попытками:
