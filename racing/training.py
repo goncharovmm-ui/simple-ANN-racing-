@@ -37,6 +37,9 @@ class TrainingCenter:
         self.map_name = Track.load(self.map_path).name or self.map_path.stem
         self.model_name = self.selected_model.stem if self.selected_model else "new-model"
         self.editing: str | None = None
+        self.numeric_editing: str | None = None
+        self.numeric_buffer = ""
+        self.numeric_replace = False
         self.best_trajectories, self.cars_per_trajectory = 3, 7
         self.hidden_units = self.model_architecture() or [64]
         self.architecture_layer = 0
@@ -109,6 +112,100 @@ class TrainingCenter:
         pygame.draw.rect(self.screen, (226, 192, 71) if not disabled else (105, 108, 112), rect, 2, border_radius=8)
         surface = self.font.render(label, True, (250, 250, 250) if not disabled else (135, 135, 135))
         self.screen.blit(surface, surface.get_rect(center=rect.center))
+
+    def numeric_specs(self) -> list[tuple[str, pygame.Rect, str, int, int, int]]:
+        """Numeric controls: key, rectangle, label, value, minimum, maximum."""
+        return [
+            ("epochs", pygame.Rect(52, 415, 190, 52), "Эпохи", self.total_epochs, 1, 100),
+            ("best", pygame.Rect(252, 415, 250, 52), "Лучших", self.best_trajectories, 1, 20),
+            ("cars", pygame.Rect(512, 415, 250, 52), "Машин", self.cars_per_trajectory, 1, 50),
+            ("layers", pygame.Rect(52, 550, 190, 42), "Слоёв", len(self.hidden_units), 1, 12),
+            ("layer", pygame.Rect(252, 550, 190, 42), "Слой", self.architecture_layer + 1, 1, len(self.hidden_units)),
+            ("units", pygame.Rect(452, 550, 270, 42), "Нейронов", self.hidden_units[self.architecture_layer], 1, 2048),
+        ]
+
+    def numeric_value(self, key: str) -> int:
+        values = {"epochs": self.total_epochs, "best": self.best_trajectories, "cars": self.cars_per_trajectory,
+                  "layers": len(self.hidden_units), "layer": self.architecture_layer + 1,
+                  "units": self.hidden_units[self.architecture_layer]}
+        return values[key]
+
+    def set_numeric_value(self, key: str, value: int) -> None:
+        specs = {item[0]: item for item in self.numeric_specs()}
+        _, _, _, _, minimum, maximum = specs[key]
+        value = max(minimum, min(maximum, int(value)))
+        if key == "epochs":
+            self.total_epochs = value
+        elif key == "best":
+            self.best_trajectories = value
+        elif key == "cars":
+            self.cars_per_trajectory = value
+        elif key == "layers":
+            while len(self.hidden_units) < value:
+                self.hidden_units.append(self.hidden_units[-1] if self.hidden_units else 64)
+            while len(self.hidden_units) > value:
+                self.hidden_units.pop()
+            self.architecture_layer = min(self.architecture_layer, len(self.hidden_units) - 1)
+        elif key == "layer":
+            self.architecture_layer = value - 1
+        elif key == "units":
+            self.hidden_units[self.architecture_layer] = value
+
+    def begin_numeric_edit(self, key: str) -> None:
+        if self.process:
+            return
+        self.numeric_editing = key
+        self.numeric_buffer = str(self.numeric_value(key))
+        self.numeric_replace = True
+        self.editing = None
+        pygame.key.start_text_input()
+
+    def finish_numeric_edit(self, cancel: bool = False) -> None:
+        if not self.numeric_editing:
+            return
+        key = self.numeric_editing
+        if not cancel and self.numeric_buffer:
+            try:
+                self.set_numeric_value(key, int(self.numeric_buffer))
+            except ValueError:
+                pass
+        self.numeric_editing = None
+        self.numeric_buffer = ""
+        self.numeric_replace = False
+        pygame.key.stop_text_input()
+
+    def numeric_control(self, key: str, rect: pygame.Rect, label: str, value: int, disabled: bool) -> None:
+        """Draw [minus] [editable number] [plus]."""
+        background = (65, 70, 80) if not disabled else (45, 48, 54)
+        border = (226, 192, 71) if self.numeric_editing == key else ((226, 192, 71) if not disabled else (105, 108, 112))
+        pygame.draw.rect(self.screen, background, rect, border_radius=8)
+        pygame.draw.rect(self.screen, border, rect, 2, border_radius=8)
+        minus = pygame.Rect(rect.x + 2, rect.y + 2, 34, rect.height - 4)
+        plus = pygame.Rect(rect.right - 36, rect.y + 2, 34, rect.height - 4)
+        for control, symbol in ((minus, "-"), (plus, "+")):
+            pygame.draw.rect(self.screen, (48, 54, 64) if not disabled else (38, 41, 47), control, border_radius=6)
+            text_surface = self.font.render(symbol, True, (250, 250, 250) if not disabled else (135, 135, 135))
+            self.screen.blit(text_surface, text_surface.get_rect(center=control.center))
+        middle = pygame.Rect(minus.right + 4, rect.y + 2, plus.x - minus.right - 8, rect.height - 4)
+        shown = self.numeric_buffer if self.numeric_editing == key else str(value)
+        label_surface = self.small_font.render(label, True, (235, 238, 242) if not disabled else (135, 135, 135))
+        value_surface = self.font.render(shown, True, (250, 250, 250) if not disabled else (135, 135, 135))
+        self.screen.blit(label_surface, (middle.x + 5, middle.centery - label_surface.get_height() // 2))
+        self.screen.blit(value_surface, (middle.right - value_surface.get_width() - 5, middle.centery - value_surface.get_height() // 2))
+
+    def handle_numeric_click(self, key: str, rect: pygame.Rect, position: tuple[int, int]) -> bool:
+        if self.process:
+            return True
+        x, y = position
+        minus = pygame.Rect(rect.x + 2, rect.y + 2, 34, rect.height - 4)
+        plus = pygame.Rect(rect.right - 36, rect.y + 2, 34, rect.height - 4)
+        if minus.collidepoint(x, y):
+            self.set_numeric_value(key, self.numeric_value(key) - 1)
+        elif plus.collidepoint(x, y):
+            self.set_numeric_value(key, self.numeric_value(key) + 1)
+        else:
+            self.begin_numeric_edit(key)
+        return True
 
     def human_demos(self, limit: int | None = None) -> list[Path]:
         """Return the fastest completed player CSVs recorded on the selected map."""
@@ -336,18 +433,16 @@ class TrainingCenter:
         elapsed = 0 if self.started_at is None else time.monotonic() - self.started_at
         remaining = max(0, self.estimate_seconds - elapsed) if self.process else self.estimate_seconds
         self.text(f"Прошло: {int(elapsed)//60:02d}:{int(elapsed)%60:02d}   Примерно осталось: {int(remaining)//60:02d}:{int(remaining)%60:02d} (оценка по прошлым запускам)", (52, 375), self.small_font, (190, 200, 210))
-        self.button(pygame.Rect(52, 415, 190, 52), f"Эпохи: {self.total_epochs}  [-/+]", bool(self.process))
-        self.button(pygame.Rect(252, 415, 250, 52), f"Лучших: {self.best_trajectories}  [-/+]", bool(self.process))
-        self.button(pygame.Rect(512, 415, 250, 52), f"Машин/луч: {self.cars_per_trajectory}  [-/+] ", bool(self.process))
+        for key, rect, label, value, _, _ in self.numeric_specs()[:3]:
+            self.numeric_control(key, rect, label, value, bool(self.process))
         self.button(pygame.Rect(772, 415, 205, 52), "Другая карта (M)", bool(self.process))
         self.button(pygame.Rect(987, 415, 235, 52), "Другая модель (L)", bool(self.process))
         self.button(pygame.Rect(52, 485, 285, 52), "Начать обучение (T)", bool(self.process))
         self.button(pygame.Rect(352, 485, 285, 52), "Сохранить модель (S)", False)
         self.button(pygame.Rect(652, 485, 270, 52), "Видео (V)", False)
         self.button(pygame.Rect(937, 485, 285, 52), "Открыть видео (Enter)", False)
-        self.button(pygame.Rect(52, 550, 190, 42), f"Слоёв: {len(self.hidden_units)}  [-/+] ", bool(self.process))
-        self.button(pygame.Rect(252, 550, 190, 42), f"Выбран слой: {self.architecture_layer + 1}", bool(self.process))
-        self.button(pygame.Rect(452, 550, 270, 42), f"Нейронов: {self.hidden_units[self.architecture_layer]}  [-/+] ", bool(self.process))
+        for key, rect, label, value, _, _ in self.numeric_specs()[3:]:
+            self.numeric_control(key, rect, label, value, bool(self.process))
         self.text("Последние сообщения:", (52, 610), self.small_font, (190, 200, 210))
         for index, line in enumerate(self.lines[-3:]):
             self.text(line[-150:], (52, 635 + index * 23), self.small_font, (220, 225, 230))
@@ -365,6 +460,18 @@ class TrainingCenter:
                     if event.type == pygame.QUIT:
                         running = False
                     elif event.type == pygame.KEYDOWN:
+                        if self.numeric_editing:
+                            if event.key == pygame.K_RETURN:
+                                self.finish_numeric_edit()
+                            elif event.key == pygame.K_ESCAPE:
+                                self.finish_numeric_edit(cancel=True)
+                            elif event.key == pygame.K_BACKSPACE:
+                                if self.numeric_replace:
+                                    self.numeric_buffer = ""
+                                    self.numeric_replace = False
+                                else:
+                                    self.numeric_buffer = self.numeric_buffer[:-1]
+                            continue
                         if self.editing:
                             if event.key in (pygame.K_RETURN, pygame.K_ESCAPE):
                                 self.editing = None
@@ -402,23 +509,32 @@ class TrainingCenter:
                             self.cars_per_trajectory = max(1, self.cars_per_trajectory - 1)
                         elif event.key == pygame.K_RIGHTBRACKET:
                             self.cars_per_trajectory = min(50, self.cars_per_trajectory + 1)
+                    elif event.type == pygame.TEXTINPUT and self.numeric_editing:
+                        digits = "".join(character for character in event.text if character.isdigit())
+                        if digits:
+                            self.numeric_buffer = (digits if self.numeric_replace else self.numeric_buffer + digits)[:4]
+                            self.numeric_replace = False
                     elif event.type == pygame.TEXTINPUT and self.editing:
                         if self.editing == "map": self.map_name = (self.map_name + event.text)[:40]
                         else: self.model_name = (self.model_name + event.text)[:40]
                     elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                         x, y = event.pos
+                        if self.numeric_editing:
+                            self.finish_numeric_edit()
+                        numeric_handled = False
+                        for key, rect, _, _, _, _ in self.numeric_specs():
+                            if rect.collidepoint(x, y):
+                                self.handle_numeric_click(key, rect, (x, y))
+                                numeric_handled = True
+                                break
+                        if numeric_handled:
+                            continue
                         if 168 <= y <= 200 and 220 <= x < 650 and not self.process:
                             self.editing = "map"
                             pygame.key.start_text_input()
                         elif 168 <= y <= 200 and 850 <= x < 1222 and not self.process:
                             self.editing = "model"
                             pygame.key.start_text_input()
-                        elif 415 <= y <= 467 and x < 242 and not self.process:
-                            self.total_epochs = max(1, min(100, self.total_epochs - 1 if x < 145 else self.total_epochs + 1))
-                        elif 415 <= y <= 467 and 252 <= x < 502 and not self.process:
-                            self.best_trajectories = max(1, min(20, self.best_trajectories - 1 if x < 375 else self.best_trajectories + 1))
-                        elif 415 <= y <= 467 and 512 <= x < 762 and not self.process:
-                            self.cars_per_trajectory = max(1, min(50, self.cars_per_trajectory - 1 if x < 637 else self.cars_per_trajectory + 1))
                         elif 415 <= y <= 467 and 772 <= x < 977 and not self.process:
                             self.map_index = (self.map_index + 1) % len(self.maps)
                             self.map_name = Track.load(self.map_path).name or self.map_path.stem
@@ -435,12 +551,6 @@ class TrainingCenter:
                             self.start_video()
                         elif 485 <= y <= 537 and 937 <= x < 1222:
                             self.open_video()
-                        elif 550 <= y <= 592 and 52 <= x < 242 and not self.process:
-                            self.change_layers(-1 if x < 147 else 1)
-                        elif 550 <= y <= 592 and 252 <= x < 442 and not self.process:
-                            self.architecture_layer = (self.architecture_layer + 1) % len(self.hidden_units)
-                        elif 550 <= y <= 592 and 452 <= x < 722 and not self.process:
-                            self.change_layer_width(-1 if x < 587 else 1)
                 self.draw()
                 pygame.display.flip()
                 self.clock.tick(30)
