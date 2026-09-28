@@ -13,6 +13,7 @@ import numpy as np
 import pygame
 
 from racing.neural import NeuralPolicy
+from racing.expert import ArtificialExpert
 
 WIDTH, HEIGHT = 1280, 800
 LIDAR_ANGLES = np.linspace(-110.0, 110.0, 15, dtype=np.float32)
@@ -93,14 +94,18 @@ class Car:
 class DemoWriter:
     fields = ["run_id", "mode", "driver", "track_id", "map_path", "episode", "step", "x", "y", "angle", "speed", "next_checkpoint", "progress", "collisions", "elapsed_s", "lap_s", "fitness", "steering", "throttle", "handbrake", *[f"lidar_{i}" for i in range(len(LIDAR_ANGLES))]]
 
-    def __init__(self, directory: Path, metadata: dict[str, str]) -> None:
-        pending = Path("data/demos/_pending")
-        pending.mkdir(parents=True, exist_ok=True)
+    def __init__(self, directory: Path, metadata: dict[str, str], require_finish: bool = True) -> None:
+        self.require_finish = require_finish
         self.metadata = metadata
         filename = f"{metadata['driver']}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{metadata['run_id'][:8]}.csv"
-        self.path = pending / filename
         self.final_path = directory / filename
-        self.committed = False
+        if require_finish:
+            pending = Path("data/demos/_pending")
+            pending.mkdir(parents=True, exist_ok=True)
+            self.path, self.committed = pending / filename, False
+        else:
+            directory.mkdir(parents=True, exist_ok=True)
+            self.path, self.committed = self.final_path, True
         self.file = self.path.open("w", newline="", encoding="utf-8")
         self.writer = csv.DictWriter(self.file, fieldnames=self.fields)
         self.writer.writeheader()
@@ -130,7 +135,8 @@ class DemoWriter:
 
     def discard(self) -> None:
         self.file.close()
-        self.path.unlink(missing_ok=True)
+        if self.require_finish:
+            self.path.unlink(missing_ok=True)
 
 
 def draw_track(screen: pygame.Surface, track: Track, next_checkpoint: int | None = None) -> None:
@@ -146,18 +152,19 @@ def draw_track(screen: pygame.Surface, track: Track, next_checkpoint: int | None
 
 
 class RacingGame:
-    def __init__(self, track: Track, record: bool = False, screen: pygame.Surface | None = None, policy: NeuralPolicy | None = None, game_mode: str = "race", map_path: Path = Path("maps/default.json")) -> None:
+    def __init__(self, track: Track, record: bool = False, screen: pygame.Surface | None = None, policy: NeuralPolicy | None = None, game_mode: str = "race", map_path: Path = Path("maps/default.json"), expert: ArtificialExpert | None = None) -> None:
         pygame.init()
         self.screen = screen if screen is not None else pygame.display.set_mode((WIDTH, HEIGHT))
         self.clock, self.font = pygame.time.Clock(), pygame.font.Font(None, 28)
         pygame.display.set_caption("Simple ANN Racing — manual data collection")
-        self.track, self.recording, self.policy = track, record, policy
+        self.track, self.recording, self.policy, self.expert = track, record, policy, expert
         self.game_mode, self.map_path = game_mode, map_path
         self.track_id = f"{map_path.stem}-{track.fingerprint()}"
         self.run_id = uuid4().hex
         self.writer: DemoWriter | None = None
         self.collisions = 0
         self.game_over = False
+        self.dagger_label: tuple[float, float, bool] | None = None
         if record:
             self.start_recording()
         self.best_lap: float | None = None
@@ -165,12 +172,13 @@ class RacingGame:
         self.episode = 1
 
     def start_recording(self) -> None:
-        if self.policy:
+        if self.policy and not self.expert:
             self.recording = False
             self.message = "AI actions are not recorded as demonstrations"
             return
-        metadata = {"run_id": self.run_id, "mode": self.game_mode, "driver": "player", "track_id": self.track_id, "map_path": str(self.map_path)}
-        self.writer = DemoWriter(Path("data/demos") / self.game_mode / self.track_id, metadata)
+        driver = "artificial_expert" if self.expert else "player"
+        metadata = {"run_id": self.run_id, "mode": self.game_mode, "driver": driver, "track_id": self.track_id, "map_path": str(self.map_path)}
+        self.writer = DemoWriter(Path("data/demos") / self.game_mode / self.track_id, metadata, require_finish=not bool(self.expert))
         self.recording = True
 
     @property
@@ -213,11 +221,15 @@ class RacingGame:
         self.message = reason
 
     def update(self, dt: float) -> tuple[float, float, bool, np.ndarray]:
+        self.dagger_label = None
         if self.game_over:
             return 0.0, 0.0, False, self.raycast()
         keys = pygame.key.get_pressed()
         if self.policy:
-            steering, throttle, handbrake = self.policy.act(self.raycast(), self.car.speed)
+            state_lidar = self.raycast()
+            steering, throttle, handbrake = self.policy.act(state_lidar, self.car.speed)
+            if self.expert and self.expert.should_label(state_lidar, (steering, throttle, handbrake)):
+                self.dagger_label = self.expert.act(self, state_lidar)
         else:
             steering = float(keys[pygame.K_RIGHT] or keys[pygame.K_d]) - float(keys[pygame.K_LEFT] or keys[pygame.K_a])
             throttle = float(keys[pygame.K_UP] or keys[pygame.K_w]) - float(keys[pygame.K_DOWN] or keys[pygame.K_s])
@@ -277,7 +289,10 @@ class RacingGame:
                             self.reset("Restarted"); self.episode += 1
                 steering, throttle, handbrake, lidar = self.update(dt)
                 if self.recording and self.writer:
-                    self.writer.write(self, steering, throttle, handbrake, lidar)
+                    if self.dagger_label:
+                        self.writer.write(self, *self.dagger_label, lidar)
+                    elif not self.expert:
+                        self.writer.write(self, steering, throttle, handbrake, lidar)
                 self.step += 1
                 self.draw(lidar)
         finally:

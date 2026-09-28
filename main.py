@@ -2,6 +2,7 @@ import argparse
 from pathlib import Path
 
 from racing.menu import MainMenu
+from racing.expert import ArtificialExpert
 from racing.neural import NeuralPolicy
 from racing.simulator import MapEditor, RacingGame, Track
 
@@ -14,23 +15,24 @@ def main() -> None:
     parser.add_argument("--driver", choices=("player", "ai"), default="player", help="race driver when --mode race is used")
     parser.add_argument("--map", type=Path, default=Path("maps/default.json"), help="map JSON path")
     parser.add_argument("--ai", type=Path, help="run autonomous mode using a trained .npz policy")
+    parser.add_argument("--dagger", type=Path, help="run AI and collect artificial-expert correction labels")
     args = parser.parse_args()
-    policy_path = args.ai or Path("models/policy.npz")
-    if not args.editor and not args.mode and not args.ai:
+    policy_path = args.dagger or args.ai or Path("models/policy.npz")
+    if not args.editor and not args.mode and not args.ai and not args.dagger:
         selection = MainMenu(policy_path.exists()).run()
         if selection is None:
             return
         args.mode, args.driver = selection
     track = Track.load(args.map)
     if args.editor or args.mode == "sandbox":
-        if args.ai or args.driver == "ai":
+        if args.ai or args.dagger or args.driver == "ai":
             parser.error("sandbox cannot use an AI driver")
         MapEditor(track, args.map).run()
     else:
-        use_ai = bool(args.ai) or args.driver == "ai"
+        use_ai = bool(args.ai or args.dagger) or args.driver == "ai"
         if use_ai and not policy_path.exists():
             parser.error(f"No neural policy at {policy_path}. Record demonstrations and run: python train.py")
-        RacingGame(track, record=not use_ai, policy=NeuralPolicy.load(policy_path) if use_ai else None, map_path=args.map).run()
+        RacingGame(track, record=not use_ai or bool(args.dagger), policy=NeuralPolicy.load(policy_path) if use_ai else None, map_path=args.map, game_mode="dagger" if args.dagger else "race", expert=ArtificialExpert() if args.dagger else None).run()
 
 
 if __name__ == "__main__":
