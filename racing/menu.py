@@ -8,7 +8,7 @@ from racing.simulator import HEIGHT, WIDTH
 
 
 class MainMenu:
-    """Small launcher that exposes the two user-facing game modes."""
+    """Launcher for sandbox, race, replay, and training center modes."""
 
     def __init__(self, policy_paths: list[Path] | None = None) -> None:
         pygame.init()
@@ -43,9 +43,10 @@ class MainMenu:
             self.text("Race — choose the driver", 215, self.font)
             self.button(first, "Player (default)", selected=True)
             self.button(second, "Neural network", disabled=not self.policy_paths)
+            self.button(third, "Replay: neural signals", disabled=not self.policy_paths)
             selected = self.policy_paths[self.policy_index].as_posix() if self.policy_paths else "нет сохранённых моделей"
             self.text(f"Модель: {selected}", 515, self.small_font, (190, 200, 210) if self.policy_paths else (255, 220, 112))
-            self.text("Enter/P — игрок | N — нейросеть | ←/→ — выбрать модель | Esc — назад", 550, self.small_font, (190, 200, 210))
+            self.text("Enter/P — игрок | N — нейросеть | R — повтор | ←/→ — выбрать модель | Esc — назад", 550, self.small_font, (190, 200, 210))
         return first, second, third
 
     def run(self) -> tuple[str, str | None, Path | None] | None:
@@ -72,6 +73,8 @@ class MainMenu:
                         self.policy_index = (self.policy_index - 1) % len(self.policy_paths)
                     elif self.page == "race" and (event.key == pygame.K_n or event.unicode.lower() == "т") and self.policy_paths:
                         pygame.quit(); return "race", "ai", self.policy_paths[self.policy_index]
+                    elif self.page == "race" and (event.key == pygame.K_r or event.unicode.lower() == "к") and self.policy_paths:
+                        pygame.quit(); return "replay", "replay", self.policy_paths[self.policy_index]
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     if self.page == "mode" and first.collidepoint(event.pos):
                         pygame.quit(); return "sandbox", None, None
@@ -82,5 +85,7 @@ class MainMenu:
                         pygame.quit(); return "race", "player", None
                     elif self.page == "race" and second.collidepoint(event.pos) and self.policy_paths:
                         pygame.quit(); return "race", "ai", self.policy_paths[self.policy_index]
+                    elif self.page == "race" and third.collidepoint(event.pos) and self.policy_paths:
+                        pygame.quit(); return "replay", "replay", self.policy_paths[self.policy_index]
             pygame.display.flip()
             self.clock.tick(60)

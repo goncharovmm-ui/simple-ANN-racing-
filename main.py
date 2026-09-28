@@ -7,32 +7,30 @@ from racing.expert import ArtificialExpert
 from racing.neural import NeuralPolicy
 from racing.simulator import MapEditor, RacingGame, Track
 from racing.training import TrainingCenter
+from racing.replay import ReplayViewer
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="2D racing simulator and demonstration collector")
     parser.add_argument("--record", action="store_true", help="kept for compatibility; player races record automatically")
     parser.add_argument("--editor", action="store_true", help="open the track sandbox/editor (shortcut)")
-    parser.add_argument("--mode", choices=("sandbox", "race", "training"), help="skip menu and open a mode")
+    parser.add_argument("--mode", choices=("sandbox", "race", "training", "replay"), help="skip menu and open a mode")
     parser.add_argument("--driver", choices=("player", "ai"), default="player", help="race driver when --mode race is used")
     parser.add_argument("--map", type=Path, default=Path("maps/default.json"), help="map JSON path")
     parser.add_argument("--ai", type=Path, help="run autonomous mode using a trained .npz policy")
     parser.add_argument("--model", type=Path, help="alias for --ai, useful for launching a saved model")
+    parser.add_argument("--replay-data", type=Path, help="recorded CSV to replay with --mode replay")
     parser.add_argument("--dagger", type=Path, help="run AI and collect artificial-expert correction labels")
     parser.add_argument("--episodes", type=int, default=20, help="number of sequential DAgger attempts when --agents 1")
     parser.add_argument("--agents", type=int, default=20, help="parallel DAgger cars (default: 20)")
     parser.add_argument("--speed", type=int, default=8, help="simulation steps per rendered frame for DAgger (default: 8)")
     args = parser.parse_args()
-    interactive = not args.editor and not args.mode and not args.ai and not args.dagger and not args.model
+    interactive = not args.editor and not args.mode and not args.ai and not args.dagger and not args.model and not args.replay_data
     while True:
         policy_path = args.dagger or args.ai or args.model or Path("models/policy.npz")
         selected_mode, selected_driver = args.mode, args.driver
         if interactive:
-            models = []
-            if Path("models/policy.npz").exists():
-                models.append(Path("models/policy.npz"))
-            models.extend(sorted(Path("models/saved").glob("*.npz")) if Path("models/saved").exists() else [])
-            models.extend(sorted(Path("models/cycle").glob("*/best.npz")) if Path("models/cycle").exists() else [])
+            models = sorted(Path("models").rglob("*.npz"))
             desktop = Path.home() / "Desktop"
             if desktop.exists():
                 models.extend(sorted(desktop.glob("*.npz")))
@@ -46,6 +44,10 @@ def main() -> None:
                 policy_path = selected_model
         if selected_mode == "training":
             TrainingCenter(args.map, policy_path if policy_path.exists() else None).run()
+        elif selected_mode == "replay":
+            if not policy_path.exists():
+                parser.error(f"No neural policy at {policy_path}")
+            ReplayViewer(Track.load(args.map), args.map, policy_path, args.replay_data).run()
         else:
             track = Track.load(args.map)
             if args.editor or selected_mode == "sandbox":
