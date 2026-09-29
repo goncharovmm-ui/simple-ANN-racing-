@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 from pathlib import Path
 
 import numpy as np
@@ -68,6 +69,7 @@ def main() -> None:
     parser.add_argument("--learning-rate", type=float, default=0.001)
     parser.add_argument("--hidden-layers", type=int, default=None, help="number of hidden layers")
     parser.add_argument("--hidden-units", type=str, default=None, help="neurons per layer: 64 or 128,64,32")
+    parser.add_argument("--metrics-output", type=Path, help="optional JSON file for the final train/validation metrics")
     args = parser.parse_args()
 
     x, y = load_demos(args.data or [Path("data/demos")])
@@ -94,6 +96,7 @@ def main() -> None:
     variances = {"weights": [np.zeros_like(value) for value in params["weights"]],
                  "biases": [np.zeros_like(value) for value in params["biases"]]}
     update = 0
+    final_validation = None
     for epoch in range(1, args.epochs + 1):
         for indices in rng.permutation(len(x_train)).reshape(-1, 1) if len(x_train) == 1 else np.array_split(rng.permutation(len(x_train)), max(1, len(x_train) // args.batch_size)):
             xb, yb = x_train[indices], y_train[indices]
@@ -119,10 +122,17 @@ def main() -> None:
                     params[name][layer] -= args.learning_rate * corrected_m / (np.sqrt(corrected_v) + 1e-8)
         if epoch == 1 or epoch % 10 == 0 or epoch == args.epochs:
             validation = loss(x_valid, y_valid, params) if len(x_valid) else loss(x_train, y_train, params)
+            final_validation = validation
             print(f"epoch {epoch:>3}/{args.epochs}: validation loss {validation:.5f}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     NeuralPolicy(params["weights"], params["biases"]).save(args.output)
-    print(f"Saved policy to {args.output} ({len(x)} samples; {len(x_train)} train, {len(x_valid)} validation; architecture {NeuralPolicy(params['weights'], params['biases']).architecture})")
+    policy = NeuralPolicy(params["weights"], params["biases"])
+    metrics = {"architecture": policy.architecture, "samples": len(x), "train_samples": len(x_train),
+               "validation_samples": len(x_valid), "epochs": args.epochs, "validation_loss": final_validation}
+    if args.metrics_output:
+        args.metrics_output.parent.mkdir(parents=True, exist_ok=True)
+        args.metrics_output.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Saved policy to {args.output} ({len(x)} samples; {len(x_train)} train, {len(x_valid)} validation; architecture {policy.architecture})")
 
 
 if __name__ == "__main__":

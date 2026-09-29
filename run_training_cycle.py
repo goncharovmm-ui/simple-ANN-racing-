@@ -29,7 +29,7 @@ def trajectory_record(game, fastest: float | None, slowest: float | None) -> dic
         color = [0, green, 0]
     else:
         color = [220, 45, 45]
-    return {"success": success, "lap_seconds": game.last_lap, "fitness": round(game.fitness, 2), "progress": game.last_lap_progress if success else game.progress,
+    return {"success": success, "lap_seconds": game.last_lap, "fitness": round(game.fitness, 2), "directional_score": round(game.directional_score, 2), "course_progress": round(game.course_progress, 5), "progress": game.last_lap_progress if success else game.progress,
             "checkpoint_points": round(game.checkpoint_points, 2), "last_checkpoint_accuracy": round(game.last_checkpoint_accuracy, 4),
             "collisions": game.collisions, "color": color,
             "points": [[round(point.x, 1), round(point.y, 1)] for point in points]}
